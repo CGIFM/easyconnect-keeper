@@ -141,15 +141,26 @@ ec_token() {
     strings /tmp/sangfor.ec.rundata 2>/dev/null | grep -E '^[0-9a-f]{32}$' | head -1
 }
 
-ec_logout_api() {   # 受支持断开：op=Logout & token=md5(currToken+salt)
-    local token salt sign
+ec_logout_api() {   # 受支持断开（实验性）：ECAgent 对 token 签名规则未完全逆向成功，
+    # 实测 md5 签名被拒(-100)、原始值 result=0(未断开)。故保留尝试但
+    # 不依赖它：失败自动落回 GUI 重启路线（已实机验证 auto_login 可靠）。
+    local token salt sign resp
     token=$(ec_token)
     [ -z "$token" ] && return 1
     salt="__md5_salt_for_ecagent_session__"
     sign=$(printf '%s' "${token}${salt}" | md5 -q)
-    local resp
     resp=$(curl -sk --max-time 6 "https://127.0.0.1:$HC_EC_PORT/ECAgent?op=Logout&token=$sign" 2>/dev/null)
     [[ "$resp" == *'"result":"1"'* ]] || [[ "$resp" == *'"result":1'* ]]
+}
+
+ec_logout_api_raw() {
+    # 备选签名：原始 TWFID 直传（ECAgent result=0 表达已收到但未证实断开）
+    local token resp
+    token=$(ec_token)
+    [ -z "$token" ] && return 1
+    resp=$(curl -sk --max-time 6 "https://127.0.0.1:$HC_EC_PORT/ECAgent?op=Logout&token=$token" 2>/dev/null)
+    # 视为成功需随后隧道确实变化；这里只返回请求是否被接受（result 0/1）
+    [[ "$resp" == *'"result":"0"'* ]] || [[ "$resp" == *'"result":"1"'* ]]
 }
 
 ec_gui_alive() { pgrep -f "/Applications/EasyConnect.app/Contents/MacOS/EasyConnect" >/dev/null 2>&1; }
@@ -226,20 +237,15 @@ do_recover() {
                 action="wait-selfheal"; rc=0   # 等 auto_login 自愈，下轮再判
             fi ;;
         C6)
-            if ec_logout_api; then
-                action="api-logout-reconnect"; rc=0
-                log "🔌 API Logout 成功，等待 auto_login 重连"
-            elif ec_gui_alive; then
-                # 无 token：重启 GUI 走自动登录
-                action="gui-restart"
-                osascript -e 'tell application "EasyConnect" to quit' >/dev/null 2>&1
-                sleep 2
-                pkill -f "/Applications/EasyConnect.app/Contents/MacOS/EasyConnect" 2>/dev/null
-                sleep 1
-                ec_launch
-            else
-                ec_launch; action="launch-ec"
-            fi ;;
+            # 主线：GUI 重启（受支持且已验证 auto_login 自动登录）。
+            # API Logout 为实验性尝试（签名规则未完全逆向），失败不影响主线。
+            action="gui-restart"
+            osascript -e 'tell application "EasyConnect" to quit' >/dev/null 2>&1
+            sleep 2
+            pkill -f "/Applications/EasyConnect.app/Contents/MacOS/EasyConnect" 2>/dev/null
+            sleep 1
+            ec_launch
+            rc=0 ;;
         C7)
             action="evidence-only(no-touch)"; rc=0   # DNS/路由：只记录不碰
             notify "DNS/路由异常：$(hc_l7_dns_route)。守护不改全局网络配置，请检查（hosts/系统DNS 属人工范围）" ;;
