@@ -45,16 +45,45 @@ EasyConnect 长时间连接后会自动断开（多网卡/代理软件干扰、�
 ```
 easyconnect-keeper/
 ├── keeper.sh                        # 守护脚本（主程序）
-├── com.cgifm.easyconnect-keeper.plist  # LaunchAgent 配置
-├── install.sh                       # 安装/卸载
+├── KeeperBar.swift                  # 菜单栏管理应用源码（Swift）
+├── com.cgifm.easyconnect-keeper.plist  # LaunchAgent 模板
+├── install.sh                       # 安装/卸载/状态
 └── README.md
 ```
+
+## 标准安装布局（与源码解耦）
+
+```
+~/Library/Application Support/EasyConnectKeeper/
+├── keeper.sh                守护脚本运行副本
+├── KeeperBar.app            菜单栏管理应用
+└── state                    实时状态文件（JSON）
+~/Library/LaunchAgents/
+├── com.cgifm.easyconnect-keeper.plist   守护开机自启 (KeepAlive)
+└── com.cgifm.keeperbar.plist            菜单栏应用开机自启
+~/Library/Logs/easyconnect-keeper/     日志
+```
+
+## 菜单栏管理（KeeperBar）
+
+屏幕右上角 🛡 盾牌图标（颜色随状态变化）：
+
+| 菜单项 | 功能 |
+|---|---|
+| 状态行 | 实时显示守护/VPN 状态 + 最近检测时间 |
+| ⏸ 暂停守护 | 写 pause 文件，守护不检测不重启（恢复=删该文件，无竞态） |
+| ⚡ 立即重连一次 | 删 pause + 杀 GUI，守护立即接管重连 |
+| ✅ 开机自启开关 | 加载/卸载 LaunchAgent，一键切换 |
+| 📄 打开日志 | TextEdit 打开 keeper.log |
+| 🛑 退出守护进程 | 仅本次开机停止（重启后自启恢复） |
+| 🗑 卸载 | 二次确认后：停守护+删自启+删程序+退出自身，彻底不留残留 |
 
 ## 使用
 
 ```bash
-./install.sh install    # 安装并启动（开机自启）
-./install.sh uninstall  # 停止并卸载
+./install.sh install    # 编译安装（守护+菜单栏应用+双开机自启）
+./install.sh uninstall  # 命令行彻底卸载
+./install.sh status     # 查看全组件状态
 tail -f ~/Library/Logs/easyconnect-keeper/keeper.log   # 看日志
 ```
 
