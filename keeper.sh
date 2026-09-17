@@ -364,7 +364,7 @@ while true; do
                     PENDING_COUNT=0
                     record_event "$cls" "$action" "$dur" "PASS" "$evidence"
                     log "✅ 恢复成功并验证通过 ($action, ${dur}s)"
-                    notify "内网 API 已恢复（$cls → $action）"
+                    notify "内网 API 已恢复（$cls → ${action}）"
                 else
                     bump_fail "$cls"
                     record_event "$cls" "$action" "$dur" "FAIL" "$evidence"

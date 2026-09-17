@@ -46,9 +46,9 @@ cmd_status() {
         hbe=$(python3 -c "import json;print(json.load(open('$HEARTBEAT_FILE')).get('ts_epoch',0))" 2>/dev/null)
         age=$(( now - hbe ))
         if [ "$age" -gt 120 ]; then
-            echo "🔴 无响应（心跳 ${age}s 未更新，count=$cnt）"
+            echo "🔴 无响应（心跳 ${age}s 未更新，count=${cnt}）"
         else
-            echo "✅ 正常（${age}s 前，推进次数=$cnt）"
+            echo "✅ 正常（${age}s 前，推进次数=${cnt}）"
         fi
     else
         echo "🔴 无心跳文件"

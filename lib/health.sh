@@ -126,7 +126,7 @@ hc_l7_dns_route() {
     case "$iface" in
         utun*) ;;
         "")    echo "fail|无到 $ip 的路由"; return 1 ;;
-        *)     echo "fail|ip=$ip 走了 $iface（未走 VPN 隧道）"; return 1 ;;
+        *)     echo "fail|ip=$ip 走了 ${iface}（未走 VPN 隧道）"; return 1 ;;
     esac
     # 系统级 DNS（业务真实链路）耗时抽查：不健康只降级为 warn，不单独判故障
     sys_ms=$(curl -s --noproxy '*' --max-time 8 -o /dev/null -w '%{time_namelookup}' "https://$HC_INNER_HOST/" 2>/dev/null | awk '{print int($1*1000)}')
