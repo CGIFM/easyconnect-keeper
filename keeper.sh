@@ -1,18 +1,17 @@
 #!/bin/bash
 # =============================================================
-# EasyConnect Keeper —— EasyConnect VPN 断线自动重连守护程序
+# EasyConnect Keeper v2 —— EasyConnect VPN 断线自动重连守护程序
 # =============================================================
-# 原理：
-#   1. 轮询 EasyConnect 本地 API（https://127.0.0.1:54530）
-#      op=DoQueryService&arg1=QUERY QSTATE L3VPN
-#      返回 result=18 (STATUS_START_SUCCESS) 即隧道正常；
-#      其他值 / 超时 / ECAgent 挂了 都视为断开。
-#   2. 连续 N 次检测失败（避免网络抖动误判）才触发重连。
-#   3. 重连策略分层：
-#      a) ECAgent 后台还在 → 优先重启 GUI（EasyConnect 配置了
-#         auto_login=true，重启后自动用保存的密码登录）。
-#      b) GUI 还活着但反复失败 → 彻底杀掉所有 EC 进程后重启。
-#   4. 全程写日志到 $LOG_FILE，断开/重连事件可追溯。
+# 原理（三层状态机）：
+#   1. 联网检测：每轮先 ping 双公网目标（223.5.5.5 / 119.29.29.29），
+#      任一通即判定「本机有网」。断网时只持续监听网络（3s 级），
+#      绝不重启 EasyConnect（避免断网时白白杀客户端）。
+#   2. 隧道检测：有网时轮询 EasyConnect 本地 API
+#      https://127.0.0.1:54530/ECAgent?op=DoQueryService&arg1=QUERY QSTATE L3VPN
+#      result=18 (STATUS_START_SUCCESS) 即隧道正常；其他值/超时 = 异常。
+#   3. 分层重连：连续 N 次异常才���发（防抖）；网络刚恢复时跳过防抖
+#      给 EasyConnect 一个自愈窗口，没自己连上就立即重启客户端。
+#   LaunchAgent KeepAlive 保证 keeper 进程本身永不退出。
 # =============================================================
 
 set -u
@@ -20,12 +19,13 @@ set -u
 EC_PORT=54530
 EC_API="https://127.0.0.1:${EC_PORT}/ECAgent"
 EC_APP="/Applications/EasyConnect.app"
-EC_SERVER="td.jlcerp.com"          # VPN 服务器主机（来自 CSClient 进程参数）
 STATUS_OK=18                       # STATUS_START_SUCCESS
-CHECK_INTERVAL=10                  # 正常时每 10 秒检测一次
+CHECK_INTERVAL=10                  # 有网时每 10 秒检测一次隧道
+NET_PROBE_INTERVAL=3               # 断网/刚恢复时每 3 秒探测网络
 FAIL_THRESHOLD=3                   # 连续失败 3 次（约 30 秒）判定断开
+SELF_HEAL_WINDOW=15                # 网络恢复后给 EasyConnect 的自愈窗口(秒)
 RETRY_INTERVAL=15                  # 触发重连后的轮询间隔
-RESTART_GUI_CMD="open -a EasyConnect"
+NET_PROBE_TARGETS=("223.5.5.5" "119.29.29.29")   # 阿里/腾讯公共 DNS 双目标
 
 LOG_DIR="$HOME/Library/Logs/easyconnect-keeper"
 LOG_FILE="$LOG_DIR/keeper.log"
@@ -43,6 +43,17 @@ rotate_log() {
     fi
 }
 
+# 联网检测：任一目标 ping 通即算有网。输出 1=有网 0=断网
+net_up() {
+    local t
+    for t in "${NET_PROBE_TARGETS[@]}"; do
+        if ping -c 1 -W 1500 -t 2 "$t" >/dev/null 2>&1; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 # 查询 L3VPN 隧道状态。输出 result 数字；查询失败输出 000
 query_status() {
     local resp
@@ -57,12 +68,9 @@ query_status() {
     if [ -z "$r" ]; then echo 000; else echo "$r"; fi
 }
 
-# 判断 EasyConnect 主程序 / ECAgent 是否存活
+# 判断 EasyConnect 主程序是否存活
 gui_alive() {
     pgrep -f "/Applications/EasyConnect.app/Contents/MacOS/EasyConnect" >/dev/null 2>&1
-}
-ecagent_alive() {
-    pgrep -f "ECAgent" >/dev/null 2>&1
 }
 
 # 重启 GUI（自动登录接管）
@@ -106,15 +114,82 @@ wait_recover() {
     return 1
 }
 
+# ===== 网络状态机：断网→持续监听→恢复后处理���道 =====
+# 断网期间在本函数内循环持续探测，网络一恢复立即返回，绝不遗漏。
+wait_net_then_heal() {
+    log "🌐 检测到断网，进入持续网络监听（每 ${NET_PROBE_INTERVAL}s 探测，不重启 EasyConnect）"
+    # 第一阶段：持续探测直到有网
+    while ! net_up; do
+        sleep $NET_PROBE_INTERVAL
+    done
+    # 第二阶段：网络刚恢复，给 EasyConnect 自愈窗口
+    log "✅ 网络已恢复，先给 ${SELF_HEAL_WINDOW}s 自愈窗口再检查隧道"
+    local waited=0
+    while [ $waited -lt $SELF_HEAL_WINDOW ]; do
+        sleep $NET_PROBE_INTERVAL
+        waited=$((waited + NET_PROBE_INTERVAL))
+        local st
+        st=$(query_status)
+        if [ "$st" = "$STATUS_OK" ]; then
+            log "✅ EasyConnect 在网络恢复后自愈成功 (result=$st)"
+            return 0
+        fi
+    done
+    # 自愈失败：立即触发重连
+    log "⚡ 自愈窗口内隧道未恢复 (result=$(query_status))，立即触发重连"
+    return 2
+}
+
+# 立即重连（跳过防抖计数）：GUI 不在→拉起；在→重启；不行→深度重启
+force_reconnect() {
+    if ! gui_alive; then
+        log "GUI 未运行，直接拉起"
+        open "$EC_APP"
+    else
+        restart_gui
+    fi
+    if wait_recover 120; then
+        return 0
+    fi
+    log "❌ 重连等待 120s 超时，升级深度重启"
+    hard_restart
+    if wait_recover 120; then
+        return 0
+    fi
+    log "❌ 深度重启仍未恢复，回到主循环继续监测"
+    return 1
+}
+
 # 主循环
-log "===== EasyConnect Keeper 启动 (pid=$$) ====="
-log "检测间隔=${CHECK_INTERVAL}s, 失败阈值=${FAIL_THRESHOLD} 次, 状态OK=${STATUS_OK}"
+log "===== EasyConnect Keeper v2 启动 (pid=$$) ====="
+log "检测间隔=${CHECK_INTERVAL}s, 失败阈值=${FAIL_THRESHOLD}, 网络探测=${NET_PROBE_INTERVAL}s, 状态OK=${STATUS_OK}"
 
 fail_count=0
 gui_restart_count=0
+offline_count=0
 
 while true; do
     rotate_log
+
+    # 第一优先：联网检测。连续 2 次不通才认定断网（防 ping 单次丢包误判）
+    if ! net_up; then
+        offline_count=$((offline_count + 1))
+        if [ $offline_count -ge 2 ]; then
+            wait_net_then_heal     # 阻塞在网络监听里，恢复后返回
+            if [ $? -eq 2 ]; then
+                force_reconnect    # 自愈失败，立即重连
+            fi
+            offline_count=0
+            fail_count=0
+            gui_restart_count=0
+            continue
+        fi
+        sleep $NET_PROBE_INTERVAL
+        continue
+    fi
+    offline_count=0
+
+    # 第二优先：隧道检测
     st=$(query_status)
 
     if [ "$st" = "$STATUS_OK" ]; then
