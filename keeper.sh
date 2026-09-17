@@ -133,12 +133,19 @@ enter_maintenance() {   # 供外部任务调用: keeper.sh maint on|off [ttl]
     esac
 }
 
-# ── 恢复操作互斥（flock）──
+# ── 恢复操作互斥（mkdir 原子锁；macOS 无 flock 命令，flock 缺失曾致恢复永不执行）──
 acquire_recover_lock() {
-    exec 200>"$FLOCK_FILE"
-    flock -n 200 2>/dev/null
+    # 死锁防线：锁目录 mtime 超 600s 视为上次恢复崩溃残留，自动清除
+    if [ -d "$FLOCK_FILE" ]; then
+        local mt
+        mt=$(stat -f%m "$FLOCK_FILE" 2>/dev/null || echo 0)
+        [ $(( $(now) - mt )) -gt 600 ] && { rm -rf "$FLOCK_FILE"; log "🧹 清除超时恢复锁"; }
+    fi
+    mkdir "$FLOCK_FILE" 2>/dev/null
 }
-release_recover_lock() { flock -u 200 2>/dev/null; }
+release_recover_lock() {
+    rmdir "$FLOCK_FILE" 2>/dev/null
+}
 
 # ── EC 重连原语 ──
 ec_token() {
