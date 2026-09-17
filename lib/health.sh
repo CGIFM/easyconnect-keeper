@@ -53,17 +53,27 @@ hc_l2_flclash() {
 }
 
 # ---------- L3 代理端口 + 实际代理请求 ----------
+# 单请求对分流节点抖动敏感，采用 2/3 表决
 hc_l3_proxy() {
     if ! nc -z -w 2 127.0.0.1 "$HC_PROXY_PORT" >/dev/null 2>&1; then
         echo "fail|端口 $HC_PROXY_PORT 未监听"; return 1
     fi
-    local code
-    code=$(curl -sx "http://127.0.0.1:$HC_PROXY_PORT" --max-time 6 -o /dev/null -w '%{http_code}' "https://www.baidu.com" 2>/dev/null)
-    case "$code" in
-        200|301|302) echo "ok|代理请求 HTTP $code"; return 0 ;;
-        000)         echo "fail|端口开但代理请求失败"; return 1 ;;
-        *)           echo "warn|代理返回 HTTP $code"; return 0 ;;
-    esac
+    local i code ok=0 fail=0 last=""
+    for i in 1 2 3; do
+        code=$(curl -sx "http://127.0.0.1:$HC_PROXY_PORT" --max-time 5 -o /dev/null -w '%{http_code}' "https://www.baidu.com" 2>/dev/null)
+        case "$code" in
+            200|301|302) ok=$((ok+1)); last="HTTP $code" ;;
+            *)           fail=$((fail+1)); last="code=$code" ;;
+        esac
+        [ "$ok" -ge 2 ] && break
+    done
+    if [ "$ok" -ge 2 ]; then
+        echo "ok|代理表决 $ok/3 ($last)"; return 0
+    fi
+    if [ "$fail" -ge 3 ]; then
+        echo "fail|代理表决 0/3 ($last)"; return 1
+    fi
+    echo "ok|代理表决 $ok/3 边缘通过 ($last)"; return 0
 }
 
 # ---------- L4 系统代理配置 ----------

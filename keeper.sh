@@ -54,13 +54,18 @@ LOWFREQ_INTERVAL=300         # 低频观察间隔
 MAINT_TTL=7200               # 维护锁默认 TTL 2h
 EVENTS_MAX=500               # 事件记录条数上限
 
-# ── 状态（内存）──
-declare -A LAST_SEEN_OK      # 分类→上次成功恢复时间戳
-declare -A FAIL_STREAK       # 分类��连续恢复失败次数
-declare -A NEXT_ALLOWED      # 分类→下次允许恢复时间
-declare -A COOLDOWN_CUR      # 分类→当前冷却秒数
+# ── 状态（内存；bash 3.2 兼容，不用关联数组，按分类命名变量）──
 PENDING_CLASS=""             # 连续异常计数用的当前分类
 PENDING_COUNT=0
+
+# 分类状态变量（C2 C3 C5 C6 C7 C8）：FS_<cls>=失败连击 NA_<cls>=下次允许 CO_<cls>=当前冷却
+fs_reset() {
+    for c in C2 C3 C5 C6 C7 C8; do
+        eval "FS_$c=0"
+        eval "NA_$c=0"
+        eval "CO_$c=$COOLDOWN_BASE"
+    done
+}
 
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 now() { date +%s; }
@@ -272,26 +277,27 @@ wait_net() {
     log "✅ 网络恢复"
 }
 
-# ── 冷却与退避 ──
+# ── 冷却与退避（bash 3.2 兼容：eval 动态变量）──
 can_attempt() {   # $1=分类
-    local t=${NEXT_ALLOWED[$1]:-0}
-    [ "$(now)" -ge "$t" ]
+    local t
+    eval "t=\$NA_$1"
+    [ "$(now)" -ge "${t:-0}" ]
 }
 bump_fail() {   # 恢复失败：退避翻倍
-    local cls=$1
-    FAIL_STREAK[$cls]=$(( ${FAIL_STREAK[$cls]:-0} + 1 ))
-    local cur=${COOLDOWN_CUR[$cls]:-$COOLDOWN_BASE}
+    local cls=$1 cur f
+    eval "f=\$FS_$cls"; f=$(( ${f:-0} + 1 ))
+    eval "cur=\$CO_$cls"; cur=${cur:-$COOLDOWN_BASE}
     cur=$(( cur * 2 )); [ "$cur" -gt "$COOLDOWN_MAX" ] && cur=$COOLDOWN_MAX
-    COOLDOWN_CUR[$cls]=$cur
-    NEXT_ALLOWED[$cls]=$(( $(now) + cur ))
-    log "📉 $cls 恢复失败第 ${FAIL_STREAK[$cls]} 次，冷却 ${cur}s"
+    eval "CO_$cls=$cur"
+    eval "NA_$cls=$(( $(now) + cur ))"
+    eval "FS_$cls=$f"
+    log "📉 $cls 恢复失败第 $f 次，冷却 ${cur}s"
 }
 mark_success() {
     local cls=$1
-    FAIL_STREAK[$cls]=0
-    COOLDOWN_CUR[$cls]=$COOLDOWN_BASE
-    NEXT_ALLOWED[$cls]=0
-    LAST_SEEN_OK[$cls]=$(now)
+    eval "FS_$cls=0"
+    eval "CO_$cls=$COOLDOWN_BASE"
+    eval "NA_$cls=0"
 }
 
 # ── 主循环 ──
@@ -299,6 +305,7 @@ log "===== EasyConnect Keeper v4 启动 (pid=$$) ====="
 log "UA模式=$(ua_enabled && echo on || echo off) 检测=${CHECK_INTERVAL}s 假连接确认=${FAIL_CONFIRM}次"
 # 默认无人值守开启（空文件）
 touch "$UAMODE_FILE"
+fs_reset
 
 while true; do
     rotate_log
@@ -359,7 +366,7 @@ while true; do
     if [ "$need_recover" = "1" ] && can_attempt "$cls" && ! in_maintenance; then
         write_state "$cls" "触发恢复" ""
         if acquire_recover_lock; then
-            streak=${FAIL_STREAK[$cls]:-0}
+            eval "streak=\$FS_$cls"; streak=${streak:-0}
             if [ "$streak" -lt "$RECOVER_FAIL_LIMIT" ]; then
                 log "🚨 $cls 连续${PENDING_COUNT}轮异常，执行恢复。证据: $evidence"
                 out=$(do_recover "$cls")
@@ -377,12 +384,12 @@ while true; do
                 fi
             else
                 # 低频观察模式：不放弃，仅拉长间隔等环境变化
-                write_state "$cls" "低频观察(${FAIL_STREAK[$cls]}次失败)" ""
-                log "👀 $cls 已连续 ${FAIL_STREAK[$cls]} 次恢复失败，进入低频观察（${LOWFREQ_INTERVAL}s）"
-                # 冷却时间到后自动重置计数重试（条件改善自动恢复）
-                NEXT_ALLOWED[$cls]=$(( $(now) + LOWFREQ_INTERVAL ))
-                if [ "${FAIL_STREAK[$cls]:-0}" -ge $((RECOVER_FAIL_LIMIT * 2)) ]; then
-                    FAIL_STREAK[$cls]=$RECOVER_FAIL_LIMIT   # 允许后续环境改善后继续重试
+                write_state "$cls" "低频观察(${streak}次失败)" ""
+                log "👀 $cls 已连续 $streak 次恢复失败，进入低频观察（${LOWFREQ_INTERVAL}s）"
+                # 低频冷却后自动重试（条件改善自动恢复正常节奏）
+                eval "NA_$cls=$(( $(now) + LOWFREQ_INTERVAL ))"
+                if [ "$streak" -ge $((RECOVER_FAIL_LIMIT * 2)) ]; then
+                    eval "FS_$cls=$RECOVER_FAIL_LIMIT"   # 允许后续环境改善后继续重试
                 fi
                 sleep $LOWFREQ_INTERVAL
             fi
