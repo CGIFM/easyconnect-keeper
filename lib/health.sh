@@ -128,30 +128,25 @@ hc_l7_dns_route() {
         "")    echo "fail|无到 $ip 的路由"; return 1 ;;
         *)     echo "fail|ip=$ip 走了 ${iface}（未走 VPN 隧道）"; return 1 ;;
     esac
-    # 系统级 DNS（业务真实链路）耗时抽查：不健康只降级为 warn，不单独判故障
-    sys_ms=$(curl -s --noproxy '*' --max-time 8 -o /dev/null -w '%{time_namelookup}' "https://$HC_INNER_HOST/" 2>/dev/null | awk '{print int($1*1000)}')
-    [ -z "$sys_ms" ] && sys_ms=99999
-    if [ "$ms" -ge "$HC_DNS_SLOW_MS" ] || [ "$sys_ms" -ge 4000 ]; then
-        echo "slow|dig=${ms}ms sysDNS=${sys_ms}ms ip=$ip 接口=$iface"; return 1
-    fi
-    echo "ok|dig=${ms}ms sysDNS=${sys_ms}ms ip=$ip 接口=$iface"; return 0
+    # sysDNS 耗时由 L8 的 dns=ms 覆盖（避免重复请求）
+    echo "ok|dig=${ms}ms ip=$ip 接口=$iface"; return 0
 }
 
 # ---------- L8 内网 API 实际可达（分类最细） ----------
-# 输出 "ok|HTTP 302" 或 "auth|401" / "server|5xx" / "tls|..." / "conn|..."
+# 输出 "ok|HTTP 302" 或 "server|5xx" / "tls|..." / "conn|..."
+# 单次 curl 同时取 http_code+errormsg+耗时（双次调用在慢DNS下成本翻倍）
 hc_l8_inner_api() {
-    local target="$HC_INNER_URL" code err
-    local args=(--noproxy '*' --max-time 8 -o /dev/null -w '%{http_code}')
-    if [ -n "$HC_INNER_IP" ]; then
-        args+=(--resolve "${HC_INNER_HOST}:443:${HC_INNER_IP}")
-    fi
-    code=$(curl -s "${args[@]}" "$target" 2>/dev/null)
-    err=$(curl -s --noproxy '*' --max-time 8 -o /dev/null -w '%{errormsg}' "$target" 2>/dev/null)
+    local target="$HC_INNER_URL" out code err dns
+    out=$(curl -4 -s --noproxy '*' --max-time 8 -o /dev/null \
+        -w '%{http_code} %{errormsg} %{time_namelookup}' "$target" 2>/dev/null)
+    code=$(printf '%s' "$out" | awk '{print $1}')
+    err=$(printf '%s' "$out" | awk '{print $2}')
+    dns=$(printf '%s' "$out" | awk '{print int($3*1000)}')
     if [ -n "$code" ] && [ "$code" != "000" ]; then
         case "$code" in
             200|301|302|303|307|308|401|403|404)
                 # 401/403=鉴权层通（服务端活着），404 也证明 HTTP 层通
-                echo "ok|HTTP $code"; return 0 ;;
+                echo "ok|HTTP $code dns=${dns}ms"; return 0 ;;
             5*) echo "server|HTTP $code 服务端错误"; return 1 ;;
             *)  echo "ok|HTTP $code"; return 0 ;;
         esac
@@ -159,7 +154,7 @@ hc_l8_inner_api() {
     # 连接失败细分
     case "$err" in
         *certificate*|*SSL*|*ssl*) echo "tls|$err"; return 1 ;;
-        *timed\ out*|*time*)       echo "conn|超时"; return 1 ;;
+        *timed\ out*|*time*|*"Resolving"*) echo "conn|超时(dns=${dns}ms)"; return 1 ;;
         *)                         echo "conn|$err"; return 1 ;;
     esac
 }
