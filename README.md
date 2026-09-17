@@ -1,108 +1,93 @@
-# EasyConnect Keeper
+# EasyConnect Keeper v4
 
-EasyConnect（深信服 SSL VPN）断线自动重连守护程序。**三层状态机**：先判断本机是否有网（断网时不折腾客户端），再查 VPN 隧道状态，异常后自动重启客户端等待恢复，全程留日志，7×24 持续监听。
+内网 API（claude.jlcops.com）链路无人值守守护。核心原则：**以 L8 内网 API 实测为准绳，不把「进程活着」或「显示已连接」当成功**。
 
-## 工作流程（v2）
-
-```
-┌─ 每 3s ping 双公网 DNS ──→ 断网？──是──→ 持续监听网络（不重启 EC）
-│                                        │ 网络恢复
-│                                        ▼
-└─ 有网 ──→ 查本地 API 隧道状态 ──→ result=18 正常 ──→ 10s 后再查
-              │ 异常
-              ▼ 连续 3 次（防抖）
-        触发重连 ──→ GUI 不在？直接拉起
-              │ GUI 在          │ 网络刚恢复
-              ▼                 ▼
-        普通重启 GUI      先给 15s 自愈窗口，失败跳过防抖立即重连
-              │ 还不行
-              ▼
-        深度重启（连 ECAgent/svpnservice 一起杀）
-```
-
-## 背景
-
-EasyConnect 长时间连接后会自动断开（多网卡/代理软件干扰、服务器端单点登录互踢、运营商掐长连接等），断开后内网 AI 服务 token 全断。本程序持续监听，断开后立即自动重连。
-
-## 原理
-
-1. **状态检测**：轮询 EasyConnect 本地 API
-   ```
-   https://127.0.0.1:54530/ECAgent?op=DoQueryService&arg1=QUERY QSTATE L3VPN
-   ```
-   `result=18`（STATUS_START_SUCCESS）= 隧道正常；其他值/超时 = 异常。
-   （端口读自 `/tmp/sangfor.ec.rundata` 前 2 字节 LE，默认 54530；接口逆向自
-   `app.asar` 内 `common.js` / `https_com.js`。）
-2. **防误判**：连续 3 次异常（约 30s）才触发重连，避免网络抖动。
-3. **分层重连**：
-   - GUI 未运行 → 直接 `open -a EasyConnect`
-   - GUI 在但断线 → 先普通重启（配置了 `auto_login`，重启后自动登录）
-   - 普通重启无效 → 深度重启（连 ECAgent / svpnservice 一起杀）
-4. **常驻**：LaunchAgent `KeepAlive`，脚本崩溃自动拉起，开机自启。
-
-## 文件结构
+## 架构
 
 ```
-easyconnect-keeper/
-├── keeper.sh                        # 守护脚本（主程序）
-├── KeeperBar.swift                  # 菜单栏管理应用源码（Swift）
-├── com.cgifm.easyconnect-keeper.plist  # LaunchAgent 模板
-├── install.sh                       # 安装/卸载/状态
-└── README.md
+主守护 keeper.sh（LaunchAgent KeepAlive，/bin/bash 3.2 兼容）
+├── lib/health.sh      8 层健康检查 → 故障分类 C0~C8（纯函数，可单测）
+├── 恢复状态机          分类→动作，mkdir 原子锁互斥，冷却/退避/低频观察
+├── 心跳               heartbeat 文件每轮更新（区分「进程在」与「循环推进」）
+└── 事件记录            events.log（证据/分类/动作/耗时/验证结果，500条有界）
+
+watchdog.sh（独立 LaunchAgent 每 60s）
+└── 只认心跳：>120s 未更新 → 杀主守护，launchd 重建（单向，不互锁）
+
+KeeperBar.app（菜单栏）
+└── 状态图标（心跳过期→☠️）· 暂停/维护/UA开关 · 诊断/日志/事件 · 卸载
+
+keeperctl（CLI，供人工与其他 AI 任务）
+└── status/diag/pause[限时]/resume/maint/ua/events/export
 ```
 
-## 标准安装布局（与源码解耦）
+## 8 层健康检查
+
+| 层 | 检查项 | 手段与要点 |
+|---|---|---|
+| L1 | 本机网络 | ping 223.5.5.5 + 经代理 HTTP 双通道（**直连 curl 在 fake-ip/TUN 下有 TLS 假故障噪声，不可用**） |
+| L2 | FlClash 核心 | pgrep FlClashCore（红线：只观察/拉起，绝不杀） |
+| L3 | 代理端口+实请求 | nc 7890 + baidu 经代理，**2/3 表决抗分流节点抖动** |
+| L4 | 系统代理 | scutil + 端口可达性；未启用不算故障 |
+| L5 | TUN 接口 | 28.0.0.1/8 utun 存在性；FlClash 没跑时可接受 |
+| L6 | EC 隧道 | 本地 API `QUERY QSTATE L3VPN`，18=正常 |
+| L7 | DNS/路由 | dig 直查（dscacheutil 有 30s 卡死 pathology）+ route 出接口必须 utun |
+| L8 | 内网 API | curl **-4 强制 IPv4**（系统 AAAA 查询 5s 超时会拖垮连接），302/401/404=通，5xx=服务端，细分 TLS/conn |
+
+## 故障分类与恢复边界
+
+| 分类 | 含义 | 恢复动作 | 边界 |
+|---|---|---|---|
+| C0 | 健康 | — | — |
+| C1 | 本机断网 | 3s 级监听网络 | 不重启任何应用 |
+| C2 | FlClash 缺失 | UA 模式下 `open` 拉起 | **绝不杀运行中的 FlClash**（全局红线） |
+| C3 | 代理失效 | GUI 整个没了才拉起；核心在→通知 | 不杀核心 |
+| C5 | EC 未连接 | GUI 不在→拉起；在→等自愈 | — |
+| C6 | 假连接(18但内网不通) | 连续 3 轮确认→GUI 重启（auto_login） | API Logout 签名未逆向成功，降为实验性 |
+| C7 | DNS/路由异常 | 记录证据+通知 | **不改 hosts/路由/系统 DNS**（人工范围） |
+| C8 | 服务端/证书问题 | 记录+通知 | **不重启 VPN**，防重启风暴 |
+
+防循环机制：恢复失败→冷却翻倍（60s→上限 30min）→同分类连败 3 次转低频观察（5min）→不放弃；恢复后需连续 3 次内网验证通过才算成功。
+
+## 模式与控制
+
+- **无人值守（UA）**：`keeperctl ua on|off`，默认开。关=尊重手动关闭，只记录不拉起
+- **暂停**：`keeperctl pause [分钟]`（限时自动恢复）/菜单栏开关
+- **维护模式**：`keeperctl maint on|off`，TTL 2h 自动过期。安装/升级/网络维护前必开
+- 所有暂停类机制互不冲突，维护期间完全不动组件
+
+## 安装布局（版本化+原子切换+可回退）
 
 ```
 ~/Library/Application Support/EasyConnectKeeper/
-├── keeper.sh                守护脚本运行副本
-├── KeeperBar.app            菜单栏管理应用
-└── state                    实时状态文件（JSON）
+├── releases/v3, v4/     版本目录
+├── current -> releases/v4   原子软链（LaunchAgent 指向此处）
+├── KeeperBar.app        菜单栏应用
+├── state / heartbeat / events.log / pause / maintenance.lock / uamode
 ~/Library/LaunchAgents/
-├── com.cgifm.easyconnect-keeper.plist   守护开机自启 (KeepAlive)
-└── com.cgifm.keeperbar.plist            菜单栏应用开机自启
-~/Library/Logs/easyconnect-keeper/     日志
+├── com.cgifm.easyconnect-keeper.plist            主守护
+├── com.cgifm.easyconnect-keeper-watchdog.plist   看门狗
+└── com.cgifm.keeperbar.plist                     菜单栏
 ```
-
-## 菜单栏管理（KeeperBar）
-
-屏幕右上角 🛡 盾牌图标（颜色随状态变化）：
-
-| 菜单项 | 功能 |
-|---|---|
-| 状态行 | 实时显示守护/VPN 状态 + 最近检测时间 |
-| ⏸ 暂停守护 | 写 pause 文件，守护不检测不重启（恢复=删该文件，无竞态） |
-| ⚡ 立即重连一次 | 删 pause + 杀 GUI，守护立即接管重连 |
-| ✅ 开机自启开关 | 加载/卸载 LaunchAgent，一键切换 |
-| 📄 打开日志 | TextEdit 打开 keeper.log |
-| 🛑 退出守护进程 | 仅本次开机停止（重启后自启恢复） |
-| 🗑 卸载 | 二次确认后：停守护+删自启+删程序+退出自身，彻底不留残留 |
-
-## 使用
 
 ```bash
-./install.sh install    # 编译安装（守护+菜单栏应用+双开机自启）
-./install.sh uninstall  # 命令行彻底卸载
-./install.sh status     # 查看全组件状态
-tail -f ~/Library/Logs/easyconnect-keeper/keeper.log   # 看日志
+./install.sh install            # 安装/升级（原子切换）
+./install.sh rollback v3        # 回退
+./install.sh uninstall          # 卸载（菜单栏也有入口）
+keeperctl diag                  # 8 层诊断
+keeperctl export                # 脱敏诊断包到桌面
 ```
 
-## 实测记录（2026-09-18）
+## 已知环境事实（诊断依据）
 
-| 事件 | 类型 | 检测到恢复耗时 |
-|---|---|---|
-| 00:28 主动退出 GUI | 模拟测试 | ~38s（3 次确认 + 重启 + 15s 登录） |
-| 00:33 自发断开 (result=2 STATUS_LOGOUT) | 真实场景 | ~38s |
-
-恢复后 `utun10 10.10.200.47` 虚拟网卡正常，`QUERY QSTATE L3VPN` 回到 18。
-
-## 已知断开诱因（排查参考）
-
-- **FlClash TUN 模式冲突**：FlClash 的 utun9（28.0.0.1）接管大部分路由，EasyConnect 到
-  `td.jlcerp.com:443` 的 SSL 长连接走代理通道，节点切换/超时会掐断长连接——本机最常见的诱因。
-- 服务器端「隧道自身路由」策略 / 单账号互踢（`result=2` 登出）。
-- 运营商对长连接的定时回收、系统休眠。
+- hosts 已有 `10.196.3.243 claude.jlcops.com`（两行重复，遗留），**系统 AAAA 查询路径 5s 超时**：所有走系统 DNS 的连接首建慢 5s；`curl -4` / hosts 命中后 0.4s。修复需改系统 DNS 配置，属人工范围
+- dscacheutil 对内网域名卡 30s（mDNSResponder 层），dig 正常 15ms——L7 弃用 dscacheutil
+- baidu 经 FlClash 代理偶发单次失败（分流节点抖动），L3 用 2/3 表决
+- ECAgent Logout API：md5 签名被拒（-100）、原始 TWFID result=0 未断开——签名规则未完全逆向，假连接恢复主线走 GUI 重启（auto_login 已验证可靠）
 
 ## 迭代历史
 
-- 2026-09-18 v1.0 初版：本地 API 状态检测 + 分层重连 + LaunchAgent 常驻。两次实测（1 模拟 + 1 真实断开）均 38s 内恢复。
+- v1 2026-09-18：EC 本地 API 检测 + 断开重连，38s 恢复
+- v2 2026-09-18：断网感知 + 持续监听 + 恢复秒连
+- v3 2026-09-18：菜单栏管理 + 标准安装布局 + 暂停机制
+- v4 2026-09-18：8 层健康检查/故障分类、有边界恢复状态机、维护锁/UA 模式、心跳+看门狗、事件记录、版本化部署。**实机验证抓到 3 个致命 bug 并修复**（bash3.2 关联数组、无 flock、L3 抖动误判）
