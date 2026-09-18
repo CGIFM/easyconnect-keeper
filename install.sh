@@ -30,6 +30,13 @@ install() {
 
     mkdir -p "$APP_SUPPORT" "$LOG_DIR" "$REL_DIR/$VER" "$APP_SUPPORT/releases-v3-archive" 2>/dev/null || true
 
+    # 迁移 v4 早期 flock 实现留下的普通文件锁。新版使用 mkdir 原子目录锁；
+    # 同名普通文件会让所有自动恢复永久失效。
+    if [ -e "$APP_SUPPORT/recover.lock" ] && [ ! -d "$APP_SUPPORT/recover.lock" ]; then
+        rm -f "$APP_SUPPORT/recover.lock"
+        echo "🧹 已迁移旧版恢复锁"
+    fi
+
     # 0. 备份旧版运行脚本（回退用）
     if [ -f "$APP_SUPPORT/keeper.sh" ] && [ ! -d "$APP_SUPPORT/releases/v3" ]; then
         mkdir -p "$REL_DIR/v3"

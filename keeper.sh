@@ -44,7 +44,7 @@ source "$SCRIPT_DIR/lib/health.sh"
 
 # ── 阈值 ──
 CHECK_INTERVAL=15            # 常态检测间隔
-FAIL_CONFIRM=3               # C6 假连接需连续确认次数
+FAIL_CONFIRM=3               # C5/C6 链路异常需连续确认次数
 VERIFY_COUNT=3               # 恢复后需连续成功次数
 VERIFY_INTERVAL=10
 COOLDOWN_BASE=60             # 分类冷却基数（秒）
@@ -135,6 +135,12 @@ enter_maintenance() {   # 供外部任务调用: keeper.sh maint on|off [ttl]
 
 # ── 恢复操作互斥（mkdir 原子锁；macOS 无 flock 命令，flock 缺失曾致恢复永不执行）──
 acquire_recover_lock() {
+    # v4 早期版本使用 exec 重定向创建过同名普通文件。升级后若不迁移，
+    # mkdir 会永远失败，所有恢复都会被误判成“另一恢复流程进行中”。
+    if [ -e "$FLOCK_FILE" ] && [ ! -d "$FLOCK_FILE" ]; then
+        rm -f "$FLOCK_FILE"
+        log "🧹 清除旧版普通文件恢复锁"
+    fi
     # 死锁防线：锁目录 mtime 超 600s 视为上次恢复崩溃残留，自动清除
     if [ -d "$FLOCK_FILE" ]; then
         local mt
@@ -178,6 +184,38 @@ ec_logout_api_raw() {
 ec_gui_alive() { pgrep -f "/Applications/EasyConnect.app/Contents/MacOS/EasyConnect" >/dev/null 2>&1; }
 
 ec_launch() { open "/Applications/EasyConnect.app"; }
+
+# 会话过期弹窗优先点击“好”，但不依赖辅助功能权限；无论点击是否成功，
+# 后续都会强制退出 GUI 并重开，确保模态窗口无法阻塞自动登录。
+ec_dismiss_expired_dialog() {
+    osascript <<'APPLESCRIPT' >/dev/null 2>&1
+tell application "System Events"
+    if not (exists process "EasyConnect") then error number 1
+    tell process "EasyConnect"
+        repeat with w in windows
+            try
+                repeat with t in (value of every static text of w)
+                    if (t as text) contains "会话已过期" then
+                        if exists button "好" of w then click button "好" of w
+                        return
+                    end if
+                end repeat
+            end try
+        end repeat
+    end tell
+end tell
+error number 1
+APPLESCRIPT
+}
+
+ec_gui_restart() {
+    ec_dismiss_expired_dialog || true
+    osascript -e 'tell application "EasyConnect" to quit' >/dev/null 2>&1 || true
+    sleep 2
+    pkill -f "/Applications/EasyConnect.app/Contents/MacOS/EasyConnect" 2>/dev/null || true
+    sleep 1
+    ec_launch
+}
 
 ec_deep_restart() {
     log "🔥 深度重启：终止 EC 全部进程后重拉"
@@ -246,17 +284,15 @@ do_recover() {
             if ! ec_gui_alive; then
                 ec_launch; action="launch-ec"; rc=0
             else
-                action="wait-selfheal"; rc=0   # 等 auto_login 自愈，下轮再判
+                # GUI 仍在但隧道未连接，常见于“会话已过期”模态弹窗。
+                # 先点“好”再强制重启；点击受权限限制时，强制重启仍可兜底。
+                ec_gui_restart; action="expired-session-restart"; rc=0
             fi ;;
         C6)
             # 主线：GUI 重启（受支持且已验证 auto_login 自动登录）。
             # API Logout 为实验性尝试（签名规则未完全逆向），失败不影响主线。
             action="gui-restart"
-            osascript -e 'tell application "EasyConnect" to quit' >/dev/null 2>&1
-            sleep 2
-            pkill -f "/Applications/EasyConnect.app/Contents/MacOS/EasyConnect" 2>/dev/null
-            sleep 1
-            ec_launch
+            ec_gui_restart
             rc=0 ;;
         C7)
             action="evidence-only(no-touch)"; rc=0   # DNS/路由：只记录不碰
@@ -307,6 +343,11 @@ mark_success() {
     eval "NA_$cls=0"
 }
 
+# 测试模式只加载函数，不启动无限循环；用于隔离验证锁迁移和恢复动作。
+if [ "${KEEPER_LIB_ONLY:-0}" = "1" ]; then
+    return 0 2>/dev/null || exit 0
+fi
+
 # ── 主循环 ──
 log "===== EasyConnect Keeper v4 启动 (pid=$$) ====="
 log "UA模式=$(ua_enabled && echo on || echo off) 检测=${CHECK_INTERVAL}s 假连接确认=${FAIL_CONFIRM}次"
@@ -338,6 +379,21 @@ while true; do
         continue
     fi
 
+    # 明确的“会话已过期”无需等待健康检查连续确认：立即确认弹窗并重启。
+    # 若辅助功能权限不可用，下面的常规 C5/C6 路径仍会强制重启兜底。
+    if ec_dismiss_expired_dialog; then
+        write_state "C5" "检测到会话过期，立即重启" ""
+        if acquire_recover_lock; then
+            log "🚨 检测到‘会话已过期’，已点击‘好’，立即重启 EasyConnect"
+            ec_gui_restart
+            release_recover_lock
+            PENDING_COUNT=0; PENDING_CLASS=""
+            sleep 5
+            continue
+        fi
+        log "⏳ 会话过期弹窗已确认，另一恢复流程正在执行"
+    fi
+
     # 健康检查
     local_result=$(hc_full_check 2>/dev/null) || local_result="C0|check-error"
     cls="${local_result%%|*}"
@@ -365,8 +421,8 @@ while true; do
 
     need_recover=0
     case "$cls" in
-        C6) [ "$PENDING_COUNT" -ge "$FAIL_CONFIRM" ] && need_recover=1 ;;
-        C2|C3|C5|C7|C8) need_recover=1 ;;   # 这些分类单轮即反应（有各自冷却）
+        C5|C6) [ "$PENDING_COUNT" -ge "$FAIL_CONFIRM" ] && need_recover=1 ;;
+        C2|C3|C7|C8) need_recover=1 ;;   # 这些分类单轮即反应（有各自冷却）
         *) need_recover=0 ;;
     esac
 
