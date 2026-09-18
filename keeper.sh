@@ -185,10 +185,27 @@ ec_gui_alive() { pgrep -f "/Applications/EasyConnect.app/Contents/MacOS/EasyConn
 
 ec_launch() { open "/Applications/EasyConnect.app"; }
 
+# macOS 自动化/辅助功能权限请求可能让 osascript 无限等待。任何 UI 操作
+# 最多允许 2 秒，超时只终止本次脚本，不影响 System Events 或网络应用。
+wait_ui_script() {
+    local pid=$1 i=0
+    while kill -0 "$pid" 2>/dev/null; do
+        if [ "$i" -ge 8 ]; then
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            return 1
+        fi
+        sleep 0.25
+        i=$((i+1))
+    done
+    wait "$pid"
+}
+
 # 会话过期弹窗优先点击“好”，但不依赖辅助功能权限；无论点击是否成功，
 # 后续都会强制退出 GUI 并重开，确保模态窗口无法阻塞自动登录。
 ec_dismiss_expired_dialog() {
-    osascript <<'APPLESCRIPT' >/dev/null 2>&1
+    local osa_pid
+    osascript <<'APPLESCRIPT' >/dev/null 2>&1 &
 tell application "System Events"
     if not (exists process "EasyConnect") then error number 1
     tell process "EasyConnect"
@@ -206,11 +223,16 @@ tell application "System Events"
 end tell
 error number 1
 APPLESCRIPT
+    osa_pid=$!
+    wait_ui_script "$osa_pid"
 }
 
 ec_gui_restart() {
+    local osa_pid
     ec_dismiss_expired_dialog || true
-    osascript -e 'tell application "EasyConnect" to quit' >/dev/null 2>&1 || true
+    osascript -e 'tell application "EasyConnect" to quit' >/dev/null 2>&1 &
+    osa_pid=$!
+    wait_ui_script "$osa_pid" || true
     sleep 2
     pkill -f "/Applications/EasyConnect.app/Contents/MacOS/EasyConnect" 2>/dev/null || true
     sleep 1
