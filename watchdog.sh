@@ -21,7 +21,7 @@ log() { echo "[$(ts)] $1" >> "$LOG_FILE"; }
 log "--- watchdog 运行 ---"
 
 # 主守护进程存在吗
-main_pids=$(pgrep -f "Application Support/EasyConnectKeeper/keeper.sh" 2>/dev/null)
+main_pids=$(pgrep -f "EasyConnectKeeper/current/keeper.sh" 2>/dev/null)
 if [ -z "$main_pids" ]; then
     log "ℹ️ 主守护未运行（launchd 应会拉起，本次不动）"
     exit 0
