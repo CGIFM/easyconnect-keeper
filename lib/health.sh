@@ -209,20 +209,19 @@ hc_full_check() {
     case "$l8" in
         server*|tls*) echo "C8|$ev"; return ;;
     esac
+    # 内网不通且 FlClash 也有明确故障 → 底层归因优先（C3/C2），避免误触发 C6 的 EC 重启
+    if [[ "$l3" == fail* ]]; then echo "C3|$ev"; return; fi
+    if [[ "$l2" == fail* ]]; then echo "C2|$ev"; return; fi
     case "$l8" in
         conn*)
-            # 内网不通但 EC 显示 18 → 假连接；EC 不是 18 → 未连接
+            # 内网不通但 EC 显示 18 → 假连接（FlClash 已排除故障）
             if [ "${l6%%|*}" = "18" ]; then
                 echo "C6|$ev"
-            elif [ "${l6%%|*}" = "000" ]; then
-                echo "C5|$ev"    # EC 本地服务都不可达
             else
                 echo "C5|$ev"
             fi
             return ;;
     esac
-    # EC 隧道正常 + 内网 API ok → 健康（即便 FlClash 有小问题，内网通就不折腾）
-    if [[ "$l3" == fail* ]]; then echo "C3|$ev"; return; fi
-    if [[ "$l2" == fail* ]]; then echo "C2|$ev"; return; fi
+    # 到这里：L8 非 ok 非 conn（tls/server 已在上面分流），FlClash 也无明确故障
     echo "C0|$ev"
 }

@@ -145,10 +145,10 @@ export PGREP_MODE=no-flclash; export TUN_MODE=none
 r=$(run_full); check_eq "C2" "${r%%|*}" "FlClash缺失分类为C2"
 unset PGREP_MODE TUN_MODE
 
-echo "── 场景4: 代理端口失效 → C3"
-export NC_MODE=fail
+echo "── 场景4: 代理端口失效(内网随之不通) → C3"
+export NC_MODE=fail; export INNER_MODE=conn
 r=$(run_full); check_eq "C3" "${r%%|*}" "代理端口失效分类为C3"
-unset NC_MODE
+unset NC_MODE INNER_MODE
 
 echo "── 场景5: EC 未连接(result=2) → C5"
 export EC_MODE=other; export INNER_MODE=conn
