@@ -1,0 +1,148 @@
+#!/bin/bash
+# =============================================================
+# keeperctl —— EasyConnect Keeper v4 统一控制入口
+# =============================================================
+# 用法：
+#   keeperctl status            全组件状态 + 实时诊断
+#   keeperctl diag              完整 8 层诊断（供 AI 任务/人工排障）
+#   keeperctl export            导出脱敏诊断包到桌面
+#   keeperctl pause [分钟]      暂停自动恢复（缺省=持续，给分钟=限时）
+#   keeperctl resume            恢复
+#   keeperctl maint on|off      维护模式（安装/升级/网络维护前先 on）
+#   keeperctl ua on|off         无人值守模式开关
+#   keeperctl events            最近事件记录
+# -------------------------------------------------------------
+# ⚠️ 其他 AI 任务操作说明（网络排障必读）：
+#   1. 联网失败先跑 `keeperctl diag` 看分类与证据，不要盲目改配置
+#   2. 严禁 kill/pkill/重启 FlClash 或 FlClashCore（会导致整机断网）
+#   3. 需要改 hosts/系统代理/DNS/重启代理软件时：
+#      先 `keeperctl maint on`，做完验证 `keeperctl diag` 通了再 `maint off`
+#   4. 守护状态看 `keeperctl status` 的 state 字段（C0=健康）
+# =============================================================
+set -u
+
+RUN_DIR="$HOME/Library/Application Support/EasyConnectKeeper"
+STATE_FILE="$RUN_DIR/state"
+HEARTBEAT_FILE="$RUN_DIR/heartbeat"
+PAUSE_FILE="$RUN_DIR/pause"
+MAINT_FILE="$RUN_DIR/maintenance.lock"
+UAMODE_FILE="$RUN_DIR/uamode"
+EVENTS_FILE="$RUN_DIR/events.log"
+LOG_FILE="$HOME/Library/Logs/easyconnect-keeper/keeper.log"
+INSTALL_DIR="$RUN_DIR"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+ts() { date '+%Y-%m-%d %H:%M:%S'; }
+
+cmd_status() {
+    echo "═══ EasyConnect Keeper v4 状态 ═══"
+    echo "── 实时状态 ──"
+    cat "$STATE_FILE" 2>/dev/null || echo "无状态文件"
+    echo "── 心跳 ──"
+    if [ -f "$HEARTBEAT_FILE" ]; then
+        hb=$(python3 -c "import json;print(json.load(open('$HEARTBEAT_FILE')).get('time','?'))" 2>/dev/null)
+        cnt=$(python3 -c "import json;print(json.load(open('$HEARTBEAT_FILE')).get('count',0))" 2>/dev/null)
+        now=$(date +%s)
+        hbe=$(python3 -c "import json;print(json.load(open('$HEARTBEAT_FILE')).get('ts_epoch',0))" 2>/dev/null)
+        age=$(( now - hbe ))
+        if [ "$age" -gt 120 ]; then
+            echo "🔴 无响应（心跳 ${age}s 未更新，count=${cnt}）"
+        else
+            echo "✅ 正常（${age}s 前，推进次数=${cnt}）"
+        fi
+    else
+        echo "🔴 无心跳文件"
+    fi
+    echo "── 模式 ──"
+    echo "无人值守: $( [ -e "$UAMODE_FILE" ] && echo 开 || echo 关 )"
+    echo "暂停:     $( [ -e "$PAUSE_FILE" ] && echo 是 || echo 否 )"
+    echo "维护模式: $( [ -e "$MAINT_FILE" ] && echo 是 || echo 否 )"
+    echo "── launchd ──"
+    launchctl list | grep -E "easyconnect-keeper|watchdog|keeperbar" || echo "未加载"
+}
+
+cmd_diag() {
+    echo "═══ 8 层链路诊断 $(ts) ═══"
+    source "$SCRIPT_DIR/lib/health.sh"
+    echo "L1 网络:     $(hc_l1_network)"
+    echo "L2 FlClash:  $(hc_l2_flclash)"
+    echo "L3 代理:     $(hc_l3_proxy)"
+    echo "L4 系统代理: $(hc_l4_sysproxy)"
+    echo "L5 TUN:      $(hc_l5_tun)"
+    echo "L6 EC 隧道:  result=$(hc_l6_ec_tunnel)"
+    echo "L7 DNS/路由: $(hc_l7_dns_route)"
+    echo "L8 内网API:  $(hc_l8_inner_api)"
+    echo "── 分类 ──"
+    r=$(hc_full_check)
+    echo "${r%%|*}"
+    echo "证据: ${r#*|}"
+}
+
+cmd_export() {
+    local out=~/Desktop/easyconnect-keeper-diag-$(date +%Y%m%d-%H%M%S).txt
+    {
+        echo "### EasyConnect Keeper 诊断包（脱敏）$(ts)"
+        cmd_diag
+        echo; echo "### 状态文件"; cat "$STATE_FILE" 2>/dev/null
+        echo; echo "### 最近事件"; tail -30 "$EVENTS_FILE" 2>/dev/null
+        echo; echo "### 守护日志尾部"; tail -50 "$LOG_FILE" 2>/dev/null
+        echo; echo "### 路由表(内网相关)"; netstat -rn | grep -E "^(10\.|172\.16|28\.)" | head -20
+        echo; echo "### utun 接口"; ifconfig | grep -E "^utun|inet " | grep -v inet6 | paste - - 2>/dev/null
+    } > "$out"
+    echo "✅ 已导出: $out"
+    open -t "$out"
+}
+
+cmd_pause() {
+    if [ -n "${1:-}" ]; then
+        local mins=$1
+        # 限时暂停：写带时间戳的文件，主循环不读它——用后台定时删除实现
+        echo "paused_at=$(date +%s)" > "$PAUSE_FILE"
+        ( sleep $(( mins * 60 )); rm -f "$PAUSE_FILE" ) >/dev/null 2>&1 &
+        echo "✅ 已暂停 ${mins} 分钟，到期自动恢复"
+    else
+        touch "$PAUSE_FILE"
+        echo "✅ 已暂停（持续，直到 keeperctl resume）"
+    fi
+}
+
+cmd_resume() {
+    rm -f "$PAUSE_FILE"
+    # 清理可能存在的限时暂停后台进程（通过标志文件）
+    echo "✅ 已恢复"
+}
+
+cmd_maint() {
+    case "${1:-}" in
+        on)
+            echo "maintainer=$(whoami) at=$(ts)" > "$MAINT_FILE"
+            echo "✅ 维护模式开启（TTL 2h 自动过期）。完成后记得 keeperctl maint off"
+            ;;
+        off) rm -f "$MAINT_FILE"; echo "✅ 维护模式关闭" ;;
+        *)   echo "用法: keeperctl maint on|off" ;;
+    esac
+}
+
+cmd_ua() {
+    case "${1:-}" in
+        on)  touch "$UAMODE_FILE"; echo "✅ 无人值守模式：开（允许自动拉起 FlClash/EC 并断开重连）" ;;
+        off) rm -f "$UAMODE_FILE"; echo "✅ 无人值守模式：关（尊重你主动关闭应用的行为，只记录通知）" ;;
+        *)   echo "用法: keeperctl ua on|off" ;;
+    esac
+}
+
+cmd_events() {
+    tail -20 "$EVENTS_FILE" 2>/dev/null || echo "暂无事件"
+}
+
+case "${1:-}" in
+    status)  cmd_status ;;
+    diag)    cmd_diag ;;
+    export)  cmd_export ;;
+    pause)   cmd_pause "${2:-}" ;;
+    resume)  cmd_resume ;;
+    maint)   cmd_maint "${2:-}" ;;
+    ua)      cmd_ua "${2:-}" ;;
+    events)  cmd_events ;;
+    *)       awk 'NR>=4 && NR<=34 {sub(/^# ?/,""); print}' "$0" | head -31 ;;
+esac

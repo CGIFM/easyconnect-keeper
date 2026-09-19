@@ -1,0 +1,10 @@
+# 复制到 ~/.config/easyconnect-keeper/config 后填写。
+# 此文件会被 keeper.sh 作为 Bash 配置 source，请只使用可信内容。
+HC_INNER_HOST="intranet.example.com"
+HC_INNER_URL="https://intranet.example.com/"
+
+# 可选配置
+HC_EC_PORT="54530"
+HC_FLCLASH_APP="/Applications/FlClash.app"
+HC_PROXY_PORT="7890"
+HC_NET_PING_TARGET="223.5.5.5"
