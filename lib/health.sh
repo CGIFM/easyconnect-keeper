@@ -189,12 +189,18 @@ hc_full_check() {
     case "$l1" in
         fail*) echo "C1|$ev"; return ;;
     esac
-    # 内网 API 是最终目标：通了且 DNS/隧道没毛病 → 健康
-    case "$l8" in
-        server*|tls*) echo "C8|$ev"; return ;;
+    # EC 隧道是内网 API 的前置条件。客户端关闭/未登录时，L8 常表现为
+    # TLS 错误；必须先判 C5，否则会误归为 C8“服务端问题”而拒绝重启。
+    case "${l6%%|*}" in
+        18) ;;
+        *) echo "C5|$ev"; return ;;
     esac
     case "$l7" in
         fail*|slow*) echo "C7|$ev"; return ;;
+    esac
+    # 只有 EC 隧道已确认正常时，TLS/5xx 才属于服务端问题。
+    case "$l8" in
+        server*|tls*) echo "C8|$ev"; return ;;
     esac
     case "$l8" in
         conn*)
@@ -207,11 +213,6 @@ hc_full_check() {
                 echo "C5|$ev"
             fi
             return ;;
-    esac
-    case "$l6" in
-        000) echo "C5|$ev"; return ;;
-        18)  ;;
-        *)   echo "C5|$ev"; return ;;
     esac
     # EC 隧道正常 + 内网 API ok → 健康（即便 FlClash 有小问题，内网通就不折腾）
     if [[ "$l3" == fail* ]]; then echo "C3|$ev"; return; fi

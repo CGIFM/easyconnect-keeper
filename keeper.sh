@@ -376,6 +376,13 @@ log "UA模式=$(ua_enabled && echo on || echo off) 检测=${CHECK_INTERVAL}s 假
 # 默认无人值守开启（空文件）
 touch "$UAMODE_FILE"
 fs_reset
+# launchd 保证主守护单实例；若上个实例被 SIGKILL，启动时立即清除其目录锁，
+# 不再等待 600 秒超时。正常运行期间仍由 acquire/release 保证互斥。
+if [ -d "$FLOCK_FILE" ]; then
+    rmdir "$FLOCK_FILE" 2>/dev/null || true
+    log "🧹 启动时清除上个实例遗留的恢复锁"
+fi
+trap 'release_recover_lock' EXIT INT TERM
 
 while true; do
     rotate_log
@@ -414,6 +421,21 @@ while true; do
             continue
         fi
         log "⏳ 会话过期弹窗已确认，另一恢复流程正在执行"
+    fi
+
+    # 用户关闭或客户端崩溃时走最高优先级快速拉起，不依赖 L8 错误形态。
+    # UA 关闭时尊重用户意图，不自动打开。
+    if ua_enabled && ! ec_gui_alive; then
+        write_state "C5" "EasyConnect 已关闭，立即拉起" ""
+        if acquire_recover_lock; then
+            log "🚨 EasyConnect 进程消失，立即拉起"
+            ec_launch
+            release_recover_lock
+            PENDING_COUNT=0; PENDING_CLASS=""
+            sleep 5
+            continue
+        fi
+        log "⏳ EasyConnect 已关闭，另一恢复流程正在执行"
     fi
 
     # 健康检查
@@ -476,7 +498,7 @@ while true; do
                 if [ "$streak" -ge $((RECOVER_FAIL_LIMIT * 2)) ]; then
                     eval "FS_$cls=$RECOVER_FAIL_LIMIT"   # 允许后续环境改善后继续重试
                 fi
-                sleep $LOWFREQ_INTERVAL
+                # 不在持锁状态下长睡；主循环继续心跳，can_attempt 负责冷却。
             fi
             release_recover_lock
         else

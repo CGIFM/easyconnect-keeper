@@ -35,7 +35,7 @@ for a in "$@"; do
     *claude.jlcops.com*)
         [ "$INNER_MODE" = "conn" ] && { echo -n "000"; exit 0; }
         [ "$INNER_MODE" = "server" ] && { echo -n "502"; exit 0; }
-        [ "$INNER_MODE" = "tls" ] && { echo -n "000"; exit 0; }
+        [ "$INNER_MODE" = "tls" ] && { echo -n "000 SSL 0.010"; exit 0; }
         [ "$has_w" = "1" ] && { echo -n "0.010"; exit 0; }
         echo -n "302"; exit 0 ;;
     *baidu.com*)
@@ -184,6 +184,16 @@ echo "── 场景11: 系统代理关闭不算故障（用户可能故意关）
 export SYSPROXY_OFF=1
 r=$(run_full); check_eq "C0" "${r%%|*}" "系统代理关闭不影响内网通"
 unset SYSPROXY_OFF
+
+echo "── 场景12: EC关闭且L8报TLS → C5（不得误判C8）"
+export EC_MODE=down; export INNER_MODE=tls
+r=$(run_full); check_eq "C5" "${r%%|*}" "EC关闭时TLS错误优先分类为C5"
+unset EC_MODE INNER_MODE
+
+echo "── 场景13: EC未连接且服务端表象5xx → C5"
+export EC_MODE=other; export INNER_MODE=server
+r=$(run_full); check_eq "C5" "${r%%|*}" "EC未连接时优先分类为C5"
+unset EC_MODE INNER_MODE
 
 rm -rf "$STUB"
 echo ""
