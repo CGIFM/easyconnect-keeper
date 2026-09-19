@@ -123,8 +123,13 @@ hc_l6_ec_tunnel() {
 # 上游 DNS；系统级 DNS 健康另用一次 curl 实测（业务视角）衡量。
 HC_DNS_SLOW_MS="${HC_DNS_SLOW_MS:-3000}"
 
+# FlClash TUN 接口名（28.0.0.1 所在 utun），供 L7 区分"走 EC 隧道"还是"被 FlClash 截走"
+hc_flclash_tun() {
+    ifconfig 2>/dev/null | awk '/^utun[0-9]+:/{name=$1} /inet 28\.0\.0\.1 /{print name; exit}' | tr -d ':'
+}
+
 hc_l7_dns_route() {
-    local t0 t1 ms ip iface sys_ms
+    local t0 t1 ms ip iface sys_ms fltun
     t0=$(hc_now_ms)
     ip=$(dig +short +time=3 +tries=1 "$HC_INNER_HOST" 2>/dev/null | awk 'NR==1{print $1}')
     t1=$(hc_now_ms)
@@ -133,10 +138,12 @@ hc_l7_dns_route() {
         echo "fail|$HC_INNER_HOST dig 解析失败"; return 1
     fi
     iface=$(route -n get "$ip" 2>/dev/null | awk '/interface:/{print $2; exit}')
+    fltun=$(hc_flclash_tun)
     case "$iface" in
-        utun*) ;;
         "")    echo "fail|无到 $ip 的路由"; return 1 ;;
-        *)     echo "fail|ip=$ip 走了 ${iface}（未走 VPN 隧道）"; return 1 ;;
+        *)     if [ -n "$fltun" ] && [ "$iface" = "$fltun" ]; then
+                   echo "fail|ip=$ip 被FlClash TUN($iface)截走（EC隧道未建立）"; return 1
+               fi ;;
     esac
     # sysDNS 耗时由 L8 的 dns=ms 覆盖（避免重复请求）
     echo "ok|dig=${ms}ms ip=$ip 接口=$iface"; return 0

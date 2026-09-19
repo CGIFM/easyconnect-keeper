@@ -181,7 +181,7 @@ ec_logout_api_raw() {
     [[ "$resp" == *'"result":"0"'* ]] || [[ "$resp" == *'"result":"1"'* ]]
 }
 
-ec_gui_alive() { pgrep -f "/Applications/EasyConnect.app/Contents/MacOS/EasyConnect" >/dev/null 2>&1; }
+ec_gui_alive() { pgrep -x "EasyConnect" >/dev/null 2>&1; }
 
 ec_launch() { open "/Applications/EasyConnect.app"; }
 
@@ -234,14 +234,14 @@ ec_gui_restart() {
     osa_pid=$!
     wait_ui_script "$osa_pid" || true
     sleep 2
-    pkill -f "/Applications/EasyConnect.app/Contents/MacOS/EasyConnect" 2>/dev/null || true
+    pkill -x "EasyConnect" 2>/dev/null || true
     sleep 1
     ec_launch
 }
 
 ec_deep_restart() {
     log "🔥 深度重启：终止 EC 全部进程后重拉"
-    pkill -f "/Applications/EasyConnect.app/Contents/MacOS/EasyConnect" 2>/dev/null
+    pkill -x "EasyConnect" 2>/dev/null
     sleep 1
     pkill -f "ECAgent" 2>/dev/null
     pkill -f "svpnservice" 2>/dev/null

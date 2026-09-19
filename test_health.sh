@@ -49,7 +49,7 @@ cat > "$STUB/pgrep" <<'EOF'
 #!/bin/bash
 case "$PGREP_MODE" in
   no-flclash) echo "$*" | grep -q FlClash && exit 1 ;;
-  no-ec)      echo "$*" | grep -q "EasyConnect.app/Contents/MacOS" && exit 1 ;;
+  no-ec)      echo "$*" | grep -q "EasyConnect" && exit 1 ;;
   none)       exit 1 ;;
 esac
 exit 0
@@ -76,7 +76,7 @@ echo "10.196.3.243"
 EOF
 cat > "$STUB/route" <<'EOF'
 #!/bin/bash
-[ "$ROUTE_MODE" = "wrong" ] && { echo "   interface: en0"; exit 0; }
+[ "$ROUTE_MODE" = "wrong" ] && { echo "   interface: utun9"; exit 0; }
 [ "$ROUTE_MODE" = "none" ] && exit 1
 echo "   interface: utun10"
 EOF
@@ -167,9 +167,9 @@ export DNS_MODE=fail
 r=$(run_full); check_eq "C7" "${r%%|*}" "DNS失败分类为C7"
 unset DNS_MODE
 
-echo "── 场景9: 路由不走 utun → C7"
+echo "── 场景9: 内网路由被 FlClash TUN 截走 → C7"
 export ROUTE_MODE=wrong
-r=$(run_full); check_eq "C7" "${r%%|*}" "路由异常分类为C7"
+r=$(run_full); check_eq "C7" "${r%%|*}" "FlClash TUN 截流分类为C7"
 unset ROUTE_MODE
 
 echo "── 场景10: TUN 消失但 FlClash 在 → 不误判（内网通则C0）"

@@ -246,7 +246,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func reconnectNow(_ sender: NSMenuItem) {
         // 若处于暂停先恢复；菜单自身完成关闭和重新打开，不依赖守护时序。
         try? FileManager.default.removeItem(at: pauseFile)
-        shell("pkill -f '/Applications/EasyConnect.app/Contents/MacOS/EasyConnect' 2>/dev/null || true; sleep 2; /usr/bin/open -a EasyConnect")
+        shell("pkill -x EasyConnect 2>/dev/null || true; sleep 2; /usr/bin/open -a EasyConnect")
     }
 
     @objc func toggleAutoStart(_ sender: NSMenuItem) {
