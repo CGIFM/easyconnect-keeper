@@ -17,7 +17,15 @@ HC_INNER_IP="${HC_INNER_IP:-}"          # 留空则每次从 DNS 取，不写死
 HC_INNER_URL="${HC_INNER_URL:-https://claude.jlcops.com/}"
 HC_EC_PORT="${HC_EC_PORT:-54530}"
 HC_FLCLASH_APP="${HC_FLCLASH_APP:-/Applications/FlClash.app}"
-HC_PROXY_PORT="${HC_PROXY_PORT:-7890}"
+# 空值表示跟随系统代理；每轮重新读取，切换客户端/端口后无需重启守护。
+HC_PROXY_PORT="${HC_PROXY_PORT:-}"
+hc_proxy_port() {
+    if [ -n "$HC_PROXY_PORT" ]; then printf '%s\n' "$HC_PROXY_PORT"; return; fi
+    local port
+    port=$(scutil --proxy | awk '/HTTPSPort :/{print $NF; exit}')
+    case "$port" in ''|*[!0-9]*) port=7890 ;; esac
+    printf '%s\n' "$port"
+}
 HC_NET_PING_TARGET="${HC_NET_PING_TARGET:-223.5.5.5}"
 
 # ---------- 工具 ----------
@@ -34,33 +42,36 @@ hc_l1_network() {
     fi
     # ping 失败可能是 ICMP 被禁，用代理 HTTP 复核
     local code
-    code=$(curl -sx "http://127.0.0.1:$HC_PROXY_PORT" --max-time 5 -o /dev/null -w '%{http_code}' "https://www.baidu.com" 2>/dev/null)
+    code=$(curl -sx "http://127.0.0.1:$(hc_proxy_port)" --max-time 5 -o /dev/null -w '%{http_code}' "https://www.baidu.com" 2>/dev/null)
     if [ "$code" = "200" ] || [ "$code" = "302" ]; then
         echo "ok|经代理 HTTP $code"; return 0
     fi
     echo "fail|ping 不通且代理请求失败(code=$code)"; return 1
 }
 
-# ---------- L2 FlClash 进程 ----------
+# ---------- L2 代理核心进程（兼容新旧客户端） ----------
 hc_l2_flclash() {
-    if pgrep -f "FlClashCore" >/dev/null 2>&1; then
+    if pgrep -x "verge-mihomo" >/dev/null 2>&1; then
+        echo "ok|Clash Verge 核心运行中"; return 0
+    fi
+    if pgrep -x "FlClashCore" >/dev/null 2>&1; then
         echo "ok|FlClashCore 运行中"; return 0
     fi
-    if pgrep -f "FlClash.app" >/dev/null 2>&1; then
-        echo "warn|GUI 在但核心退出"; return 1
+    if pgrep -x "clash-verge" >/dev/null 2>&1 || pgrep -f "[F]lClash.app" >/dev/null 2>&1; then
+        echo "warn|代理 GUI 在但核心退出"; return 1
     fi
-    echo "fail|FlClash 未运行"; return 1
+    echo "fail|未发现 Clash Verge / FlClash 核心"; return 1
 }
 
 # ---------- L3 代理端口 + 实际代理请求 ----------
 # 单请求对分流节点抖动敏感，采用 2/3 表决
 hc_l3_proxy() {
-    if ! nc -z -w 2 127.0.0.1 "$HC_PROXY_PORT" >/dev/null 2>&1; then
-        echo "fail|端口 $HC_PROXY_PORT 未监听"; return 1
+    if ! nc -z -w 2 127.0.0.1 "$(hc_proxy_port)" >/dev/null 2>&1; then
+        echo "fail|端口 $(hc_proxy_port) 未监听"; return 1
     fi
     local i code ok=0 fail=0 last=""
     for i in 1 2 3; do
-        code=$(curl -sx "http://127.0.0.1:$HC_PROXY_PORT" --max-time 5 -o /dev/null -w '%{http_code}' "https://www.baidu.com" 2>/dev/null)
+        code=$(curl -sx "http://127.0.0.1:$(hc_proxy_port)" --max-time 5 -o /dev/null -w '%{http_code}' "https://www.baidu.com" 2>/dev/null)
         case "$code" in
             200|301|302) ok=$((ok+1)); last="HTTP $code" ;;
             *)           fail=$((fail+1)); last="code=$code" ;;
@@ -93,15 +104,11 @@ hc_l4_sysproxy() {
 # ---------- L5 TUN 接口 ----------
 hc_l5_tun() {
     local tun_ip
-    tun_ip=$(ifconfig 2>/dev/null | awk '/^utun[0-9]+:/{name=$1} /inet 28\.0\.0\.1/{print name; exit}' | tr -d ':')
+    tun_ip=$(hc_proxy_tun)
     if [ -n "$tun_ip" ]; then
-        echo "ok|FlClash TUN=$tun_ip (28.0.0.1)"; return 0
+        echo "ok|代理 TUN=$tun_ip"; return 0
     fi
-    # TUN 不在：只有当 FlClash 在运行时才是异常（用户可能关了 FlClash）
-    if pgrep -f "FlClashCore" >/dev/null 2>&1; then
-        echo "warn|FlClash 运行但 TUN 接口消失"; return 1
-    fi
-    echo "off|TUN 不存在（FlClash 未运行，可接受）"; return 0
+    echo "off|未发现代理 TUN（仅系统代理模式可接受）"; return 0
 }
 
 # ---------- L6 EasyConnect 本地服务与隧道 ----------
@@ -123,26 +130,28 @@ hc_l6_ec_tunnel() {
 # 上游 DNS；系统级 DNS 健康另用一次 curl 实测（业务视角）衡量。
 HC_DNS_SLOW_MS="${HC_DNS_SLOW_MS:-3000}"
 
-# FlClash TUN 接口名（28.0.0.1 所在 utun），供 L7 区分"走 EC 隧道"还是"被 FlClash 截走"
-hc_flclash_tun() {
-    ifconfig 2>/dev/null | awk '/^utun[0-9]+:/{name=$1} /inet 28\.0\.0\.1 /{print name; exit}' | tr -d ':'
+# 同时识别 FlClash 和 Clash Verge 的常用 TUN 地址，避免把 VPN 本身误当代理。
+hc_proxy_tun() {
+    ifconfig 2>/dev/null | awk '/^utun[0-9]+:/{name=$1} /inet (28\.0\.0\.1|198\.18\.0\.1) /{sub(/:$/, "", name); print name}'
 }
+# 保留旧函数名，兼容已有诊断脚本。
+hc_flclash_tun() { hc_proxy_tun; }
 
 hc_l7_dns_route() {
     local t0 t1 ms ip iface sys_ms fltun
     t0=$(hc_now_ms)
-    ip=$(dig +short +time=3 +tries=1 "$HC_INNER_HOST" 2>/dev/null | awk 'NR==1{print $1}')
+    ip=$(dig +short +time=3 +tries=1 "$HC_INNER_HOST" 2>/dev/null | awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/{print; exit}')
     t1=$(hc_now_ms)
     ms=$((t1 - t0))
     if [ -z "$ip" ]; then
         echo "fail|$HC_INNER_HOST dig 解析失败"; return 1
     fi
     iface=$(route -n get "$ip" 2>/dev/null | awk '/interface:/{print $2; exit}')
-    fltun=$(hc_flclash_tun)
+    fltun=$(hc_proxy_tun)
     case "$iface" in
         "")    echo "fail|无到 $ip 的路由"; return 1 ;;
-        *)     if [ -n "$fltun" ] && [ "$iface" = "$fltun" ]; then
-                   echo "fail|ip=$ip 被FlClash TUN($iface)截走（EC隧道未建立）"; return 1
+        *)     if [ -n "$fltun" ] && printf '%s\n' "$fltun" | grep -Fxq "$iface"; then
+                   echo "fail|ip=$ip 被代理 TUN($iface)截走（EC隧道未建立）"; return 1
                fi ;;
     esac
     # sysDNS 耗时由 L8 的 dns=ms 覆盖（避免重复请求）
@@ -154,25 +163,22 @@ hc_l7_dns_route() {
 # 单次 curl 同时取 http_code+errormsg+耗时（双次调用在慢DNS下成本翻倍）
 hc_l8_inner_api() {
     local target="$HC_INNER_URL" out code err dns
+    # 使用制表符分隔，保留含空格的错误详情；不把畸形/空响应当成健康。
     out=$(curl -4 -s --noproxy '*' --max-time 8 -o /dev/null \
-        -w '%{http_code} %{errormsg} %{time_namelookup}' "$target" 2>/dev/null)
-    code=$(printf '%s' "$out" | awk '{print $1}')
-    err=$(printf '%s' "$out" | awk '{print $2}')
-    dns=$(printf '%s' "$out" | awk '{print int($3*1000)}')
-    if [ -n "$code" ] && [ "$code" != "000" ]; then
-        case "$code" in
-            200|301|302|303|307|308|401|403|404)
-                # 401/403=鉴权层通（服务端活着），404 也证明 HTTP 层通
-                echo "ok|HTTP $code dns=${dns}ms"; return 0 ;;
-            5*) echo "server|HTTP $code 服务端错误"; return 1 ;;
-            *)  echo "ok|HTTP $code"; return 0 ;;
-        esac
-    fi
-    # 连接失败细分
+        -w '%{http_code}\t%{errormsg}\t%{time_namelookup}' "$target" 2>/dev/null)
+    code=$(printf '%s' "$out" | cut -f1)
+    err=$(printf '%s' "$out" | cut -f2)
+    dns=$(printf '%s' "$out" | awk -F '\t' '{print int($3*1000)}')
+    case "$code" in
+        [1-5][0-9][0-9])
+            case "$code" in
+                5*) echo "server|HTTP $code 服务端错误"; return 1 ;;
+                *) echo "ok|HTTP $code dns=${dns}ms"; return 0 ;;
+            esac ;;
+    esac
     case "$err" in
         *certificate*|*SSL*|*ssl*) echo "tls|$err"; return 1 ;;
-        *timed\ out*|*time*|*"Resolving"*) echo "conn|超时(dns=${dns}ms)"; return 1 ;;
-        *)                         echo "conn|$err"; return 1 ;;
+        *) echo "conn|${err:-未取得有效HTTP响应} dns=${dns}ms"; return 1 ;;
     esac
 }
 
@@ -192,6 +198,8 @@ hc_full_check() {
 
     ev="L1[$l1] L2[$l2] L3[$l3] L4[$l4] L5[$l5] L6[$l6] L7[$l7] L8[$l8]"
 
+    # 普通业务请求实测通是首要标准；附属代理进程/公网探测不可盖过它。
+    case "$l8" in ok\|*) echo "C0|$ev"; return ;; esac
     # ── 分类决策（按因果链从底层到顶层）──
     case "$l1" in
         fail*) echo "C1|$ev"; return ;;
@@ -209,19 +217,13 @@ hc_full_check() {
     case "$l8" in
         server*|tls*) echo "C8|$ev"; return ;;
     esac
-    # 内网不通且 FlClash 也有明确故障 → 底层归因优先（C3/C2），避免误触发 C6 的 EC 重启
+    # EC=18 且路由有效、但普通请求失败，是 VPN 假连接；公网代理失败
+    # 不是内网直连的前置条件，不能阻止 C6 恢复（如源地址选择失效）。
+    case "$l8" in
+        conn*) echo "C6|$ev"; return ;;
+    esac
     if [[ "$l3" == fail* ]]; then echo "C3|$ev"; return; fi
     if [[ "$l2" == fail* ]]; then echo "C2|$ev"; return; fi
-    case "$l8" in
-        conn*)
-            # 内网不通但 EC 显示 18 → 假连接（FlClash 已排除故障）
-            if [ "${l6%%|*}" = "18" ]; then
-                echo "C6|$ev"
-            else
-                echo "C5|$ev"
-            fi
-            return ;;
-    esac
-    # 到这里：L8 非 ok 非 conn（tls/server 已在上面分流），FlClash 也无明确故障
-    echo "C0|$ev"
+    # 检查函数未返回合法状态时仅记录异常，不宣称健康、不盲目重连。
+    echo "C7|检测结果异常 $ev"
 }

@@ -7,9 +7,8 @@
 #
 # 恢复状态机（分类→动作，有边界不重启风暴）：
 #   C1 断网        → wait_net：3s 级监听，恢复后走验证，不重启任何应用
-#   C2 核心缺失    → 仅当无人值守模式开：open FlClash（拉起，绝不杀）
-#   C3 代理失效    → 观察 2 轮（可能自愈）→ 通知；无人值守+FlClash GUI
-#                    也没了才拉起 FlClash；绝不杀核心（全局红线）
+#   C2 核心缺失    → 只通知，不管理代理客户端
+#   C3 代理失效    → 只通知，不拉起/结束/重启任何代理客户端
 #   C5 EC 未连接   → GUI 不在则拉起；GUI 在则等 1 轮自愈 → API Logout
 #                    (受支持断开) → auto_login 重连 → 无 token 才 GUI 重启
 #   C6 假连接      → 连续 3 轮确认 → API Logout 重连 → 深度重启兜底
@@ -250,14 +249,11 @@ ec_deep_restart() {
     ec_launch
 }
 
-# ── FlClash 拉起（红线：只拉起消失的，绝不杀）──
+# 代理客户端由用户管理；守护绝不拉起/结束/重启任何代理程序。
+# 这样切换为 Clash Verge 或更换订阅时不会误启动旧 FlClash 争抢网络。
 flclash_launch() {
-    if pgrep -f "FlClash.app" >/dev/null 2>&1; then
-        log "🔒 FlClash 仍在运行，按红线不干预"
-        return 1
-    fi
-    open "$HC_FLCLASH_APP"
-    log "🚀 FlClash 未运行，已拉起"
+    log "🔒 代理应用由用户管理，守护只观察不拉起"
+    return 1
 }
 
 # ── 验证：恢复后连续 VERIFY_COUNT 次内网通才算成功 ──
@@ -286,22 +282,9 @@ do_recover() {
         C1)  # 断网：交给 wait_net，不算恢复动作
             wait_net
             action="wait-net"; rc=0 ;;
-        C2)
-            if ua_enabled; then
-                flclash_launch; action="launch-flclash"; rc=$?
-                sleep 20
-            else action="skip(ua-off)"; rc=0; fi ;;
-        C3)
-            # 代理失效：先观察，FlClash GUI 整个没了才拉起；核心在则通知（红线）
-            if ! pgrep -f "FlClash.app" >/dev/null 2>&1; then
-                if ua_enabled; then
-                    flclash_launch; action="launch-flclash"; rc=$?
-                    sleep 20
-                else action="skip(ua-off)"; rc=0; fi
-            else
-                action="notify-only(core-alive)"; rc=0
-                notify "代理端口异常但 FlClash 核心在运行，请人工检查（守护按红线不杀核心）"
-            fi ;;
+        C2|C3)
+            action="notify-only(proxy-managed-by-user)"; rc=0
+            notify "代理检测异常，守护保留当前代理和订阅，仅通知；不会拉起或重启代理应用" ;;
         C5)
             if ! ec_gui_alive; then
                 ec_launch; action="launch-ec"; rc=0
@@ -439,7 +422,8 @@ while true; do
     fi
 
     # 健康检查
-    local_result=$(hc_full_check 2>/dev/null) || local_result="C0|check-error"
+    local_result=$(hc_full_check 2>/dev/null) || local_result="C7|check-error"
+    [ -n "$local_result" ] || local_result="C7|check-empty"
     cls="${local_result%%|*}"
     evidence="${local_result#*|}"
 

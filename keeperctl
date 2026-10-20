@@ -30,7 +30,14 @@ UAMODE_FILE="$RUN_DIR/uamode"
 EVENTS_FILE="$RUN_DIR/events.log"
 LOG_FILE="$HOME/Library/Logs/easyconnect-keeper/keeper.log"
 INSTALL_DIR="$RUN_DIR"
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# macOS readlink 没有 -f；逐层解析软链，确保从 PATH 入口也能找到 lib。
+SCRIPT_PATH="$0"
+while [ -L "$SCRIPT_PATH" ]; do
+    SCRIPT_BASE="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
+    SCRIPT_PATH="$(readlink "$SCRIPT_PATH")"
+    case "$SCRIPT_PATH" in /*) ;; *) SCRIPT_PATH="$SCRIPT_BASE/$SCRIPT_PATH" ;; esac
+done
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 
 ts() { date '+%Y-%m-%d %H:%M:%S'; }
 
@@ -63,9 +70,9 @@ cmd_status() {
 
 cmd_diag() {
     echo "═══ 8 层链路诊断 $(ts) ═══"
-    source "$SCRIPT_DIR/lib/health.sh"
+    source "$SCRIPT_DIR/lib/health.sh" || return 1
     echo "L1 网络:     $(hc_l1_network)"
-    echo "L2 FlClash:  $(hc_l2_flclash)"
+    echo "L2 代理核心:  $(hc_l2_flclash)"
     echo "L3 代理:     $(hc_l3_proxy)"
     echo "L4 系统代理: $(hc_l4_sysproxy)"
     echo "L5 TUN:      $(hc_l5_tun)"
@@ -125,7 +132,7 @@ cmd_maint() {
 
 cmd_ua() {
     case "${1:-}" in
-        on)  touch "$UAMODE_FILE"; echo "✅ 无人值守模式：开（允许自动拉起 FlClash/EC 并断开重连）" ;;
+        on)  touch "$UAMODE_FILE"; echo "✅ 无人值守模式：开（允许自动恢复 EasyConnect，代理应用只观察）" ;;
         off) rm -f "$UAMODE_FILE"; echo "✅ 无人值守模式：关（尊重你主动关闭应用的行为，只记录通知）" ;;
         *)   echo "用法: keeperctl ua on|off" ;;
     esac
