@@ -63,3 +63,10 @@ PROJECT_UPDATES
 2026-09-18 v1.0（初版）
 - 逆向 app.asar 定位本地 API(54530)；QUERY QSTATE L3VPN 无 token，18=隧道正常
 - 10s 轮询 + 分层重连 + LaunchAgent；两次实测（模拟+真实断开）38s 恢复
+
+## 2026-10-20 · Mac 迁移核对
+- 确认守护已在本机运行：`com.cgifm.easyconnect-keeper`（KeepAlive）+ `com.cgifm.easyconnect-keeper-watchdog`（60s）+ KeeperBar。
+- 修复 `keeperctl` 从 `~/.local/bin` 软链调用时找不到 `lib/health.sh` 的问题（逐层解析软链）。
+- 部署去掉 FlClash 拉起/重启逻辑的红线版本，代理客户端改为只观察。
+- 健康检查兼容 Clash Verge（本机为 7897 系统代理 + utun1024），8 层诊断实测 C0。
+- 守护仍保持 2026-09-25 起的 `manual` 暂停状态，未擅自恢复；`keeperctl resume` 可开启自动恢复。
