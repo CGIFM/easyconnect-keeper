@@ -70,3 +70,8 @@ PROJECT_UPDATES
 - 部署去掉 FlClash 拉起/重启逻辑的红线版本，代理客户端改为只观察。
 - 健康检查兼容 Clash Verge（本机为 7897 系统代理 + utun1024），8 层诊断实测 C0。
 - 守护仍保持 2026-09-25 起的 `manual` 暂停状态，未擅自恢复；`keeperctl resume` 可开启自动恢复。
+
+## 2026-10-20 · 图形控制台
+- 新增 `ControlPanel.swift`：原生 AppKit 控制台，展示守护/EasyConnect/内网 API 状态，支持打开与退出 EasyConnect、暂停/恢复守护、8 层诊断和打开日志。
+- 新增 `IconMaker.swift` 与 `build-control-app.sh`，一键编译并安装到 `/Applications/EasyConnect 控制台.app`，Dock 可见并生成桌面快捷方式。
+- 已实测启动、状态刷新与诊断输出；守护仍保持 `manual` 暂停状态，未自动恢复。

@@ -87,6 +87,17 @@ keeperctl export                # 脱敏诊断包到桌面
 - baidu 经 FlClash 代理偶发单次失败（分流节点抖动），L3 用 2/3 表决
 - ECAgent Logout API：md5 签名被拒（-100）、原始 TWFID result=0 未断开——签名规则未完全逆向，假连接恢复主线走 GUI 重启（auto_login 已验证可靠）
 
+## 图形控制台
+
+`/Applications/EasyConnect 控制台.app`（源码 `ControlPanel.swift`，构建 `build-control-app.sh`）提供不依赖终端的日常操作：
+
+- 查看守护状态（正常/暂停/心跳过期）、EasyConnect 隧道是否已连接、内网 API 是否可达；
+- 打开/退出 EasyConnect（退出前二次确认）；
+- 暂停/恢复守护（等价于 `keeperctl pause/resume`）；
+- 一键运行 8 层诊断并查看输出，打开守护日志。
+
+重新构建：`sh build-control-app.sh`。应用为 Dock 可见的普通 App，桌面会同步一个快捷方式。
+
 ## 迭代历史
 
 - v1 2026-09-18：EC 本地 API 检测 + 断开重连，38s 恢复
