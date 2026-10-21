@@ -336,6 +336,10 @@ bump_fail() {   # 恢复失败：退避翻倍
     eval "f=\$FS_$cls"; f=$(( ${f:-0} + 1 ))
     eval "cur=\$CO_$cls"; cur=${cur:-$COOLDOWN_BASE}
     cur=$(( cur * 2 )); [ "$cur" -gt "$COOLDOWN_MAX" ] && cur=$COOLDOWN_MAX
+    # 连败后降低重试频率，但到期必须继续执行动作，不能永久停在观察分支。
+    if [ "$f" -ge "$RECOVER_FAIL_LIMIT" ] && [ "$cur" -lt "$LOWFREQ_INTERVAL" ]; then
+        cur=$LOWFREQ_INTERVAL
+    fi
     eval "CO_$cls=$cur"
     eval "NA_$cls=$(( $(now) + cur ))"
     eval "FS_$cls=$f"
@@ -346,6 +350,46 @@ mark_success() {
     eval "FS_$cls=0"
     eval "CO_$cls=$COOLDOWN_BASE"
     eval "NA_$cls=0"
+}
+
+# 到期后的完整恢复事务；低频模式也必须走同一动作与验证路径。
+attempt_recovery() {
+    local cls=$1 evidence=$2 out action dur
+    if ! acquire_recover_lock; then
+        write_state "$cls" "等待另一恢复流程结束" ""
+        log "⏳ 另一恢复流程进行中，跳过本轮"
+        return
+    fi
+    case "$cls" in
+        C5|C6) write_state "$cls" "正在自动重连 EasyConnect" "recover" ;;
+        *) write_state "$cls" "正在记录故障并通知，保留现有网络配置" "observe" ;;
+    esac
+    log "🚨 $cls 连续${PENDING_COUNT}轮异常，执行恢复。证据: $evidence"
+    out=$(do_recover "$cls")
+    action="${out%%|*}"; dur="${out#*|}"
+    write_state "$cls" "恢复动作已执行，正在验证内网" "$action"
+    if verify_recovered; then
+        fs_reset
+        PENDING_COUNT=0; PENDING_CLASS=""
+        record_event "$cls" "$action" "$dur" "PASS" "$evidence"
+        write_state "C0" "自动恢复成功，内网已连续验证通过" "$action"
+        log "✅ 恢复成功并验证通过 ($action, ${dur}s)"
+        notify "内网 API 已恢复（$cls → ${action}）"
+    else
+        bump_fail "$cls"
+        record_event "$cls" "$action" "$dur" "FAIL" "$evidence"
+        write_retry_state "$cls"
+    fi
+    release_recover_lock
+}
+
+write_retry_state() {
+    local cls=$1 next failures remaining
+    eval "next=\$NA_$cls"
+    eval "failures=\$FS_$cls"
+    remaining=$((next - $(now)))
+    [ "$remaining" -lt 0 ] && remaining=0
+    write_state "$cls" "恢复失败${failures}次，${remaining}秒后自动重试" "cooldown"
 }
 
 # 测试模式只加载函数，不启动无限循环；用于隔离验证锁迁移和恢复动作。
@@ -429,6 +473,7 @@ while true; do
 
     case "$cls" in
         C0)
+            fs_reset
             PENDING_COUNT=0; PENDING_CLASS=""
             write_state "C0" "内网 API 健康" ""
             sleep $CHECK_INTERVAL
@@ -455,41 +500,11 @@ while true; do
     esac
 
     if [ "$need_recover" = "1" ] && can_attempt "$cls" && ! in_maintenance; then
-        write_state "$cls" "触发恢复" ""
-        if acquire_recover_lock; then
-            eval "streak=\$FS_$cls"; streak=${streak:-0}
-            if [ "$streak" -lt "$RECOVER_FAIL_LIMIT" ]; then
-                log "🚨 $cls 连续${PENDING_COUNT}轮异常，执行恢复。证据: $evidence"
-                out=$(do_recover "$cls")
-                action="${out%%|*}"; dur="${out#*|}"
-                # 验证
-                if verify_recovered; then
-                    mark_success "$cls"
-                    PENDING_COUNT=0
-                    record_event "$cls" "$action" "$dur" "PASS" "$evidence"
-                    log "✅ 恢复成功并验证通过 ($action, ${dur}s)"
-                    notify "内网 API 已恢复（$cls → ${action}）"
-                else
-                    bump_fail "$cls"
-                    record_event "$cls" "$action" "$dur" "FAIL" "$evidence"
-                fi
-            else
-                # 低频观察模式：不放弃，仅拉长间隔等环境变化
-                write_state "$cls" "低频观察(${streak}次失败)" ""
-                log "👀 $cls 已连续 $streak 次恢复失败，进入低频观察（${LOWFREQ_INTERVAL}s）"
-                # 低频冷却后自动重试（条件改善自动恢复正常节奏）
-                eval "NA_$cls=$(( $(now) + LOWFREQ_INTERVAL ))"
-                if [ "$streak" -ge $((RECOVER_FAIL_LIMIT * 2)) ]; then
-                    eval "FS_$cls=$RECOVER_FAIL_LIMIT"   # 允许后续环境改善后继续重试
-                fi
-                # 不在持锁状态下长睡；主循环继续心跳，can_attempt 负责冷却。
-            fi
-            release_recover_lock
-        else
-            log "⏳ 另一恢复流程进行中，跳过本轮"
-        fi
+        attempt_recovery "$cls" "$evidence"
+    elif [ "$need_recover" = "1" ] && ! can_attempt "$cls"; then
+        write_retry_state "$cls"
     else
-        write_state "$cls" "观察中(${PENDING_COUNT})" ""
+        write_state "$cls" "连续异常确认中(${PENDING_COUNT}/${FAIL_CONFIRM})" "confirm"
     fi
 
     sleep $CHECK_INTERVAL

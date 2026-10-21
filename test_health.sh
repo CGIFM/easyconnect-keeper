@@ -33,11 +33,12 @@ done
 for a in "$@"; do
   case "$a" in
     *claude.jlcops.com*)
-        [ "$INNER_MODE" = "conn" ] && { echo -n "000"; exit 0; }
-        [ "$INNER_MODE" = "server" ] && { echo -n "502"; exit 0; }
-        [ "$INNER_MODE" = "tls" ] && { echo -n "000 SSL 0.010"; exit 0; }
-        [ "$has_w" = "1" ] && { echo -n "0.010"; exit 0; }
-        echo -n "302"; exit 0 ;;
+        case "${INNER_MODE:-ok}" in
+          conn) printf '000\tFailed to connect\t0.010'; exit 7 ;;
+          server) printf '502\t\t0.010'; exit 0 ;;
+          tls) printf '000\tSSL certificate error\t0.010'; exit 60 ;;
+          *) printf '302\t\t0.010'; exit 0 ;;
+        esac ;;
     *baidu.com*)
         [ "$PROXY_MODE" = "fail" ] && { echo -n "000"; exit 0; }
         echo -n "200"; exit 0 ;;
@@ -136,18 +137,18 @@ echo "── 场景1: 全链路健康 → C0"
 r=$(run_full); check_eq "C0" "${r%%|*}" "全正常分类为C0"
 
 echo "── 场景2: 断网 → C1"
-export PING_FAIL=1; export PROXY_MODE=fail
+export PING_FAIL=1; export PROXY_MODE=fail; export INNER_MODE=conn
 r=$(run_full); check_eq "C1" "${r%%|*}" "断网分类为C1"
-unset PING_FAIL PROXY_MODE
+unset PING_FAIL PROXY_MODE INNER_MODE
 
-echo "── 场景3: FlClash 全没 → C2"
+echo "── 场景3: 代理核心缺失但内网可达 → C0"
 export PGREP_MODE=no-flclash; export TUN_MODE=none
-r=$(run_full); check_eq "C2" "${r%%|*}" "FlClash缺失分类为C2"
+r=$(run_full); check_eq "C0" "${r%%|*}" "内网通时不受代理核心缺失影响"
 unset PGREP_MODE TUN_MODE
 
-echo "── 场景4: 代理端口失效(内网随之不通) → C3"
+echo "── 场景4: 代理端口失效且VPN假连接 → C6"
 export NC_MODE=fail; export INNER_MODE=conn
-r=$(run_full); check_eq "C3" "${r%%|*}" "代理端口失效分类为C3"
+r=$(run_full); check_eq "C6" "${r%%|*}" "公网代理异常不阻止VPN假连接恢复"
 unset NC_MODE INNER_MODE
 
 echo "── 场景5: EC 未连接(result=2) → C5"
@@ -164,9 +165,9 @@ r=$(run_full); check_eq "C8" "${r%%|*}" "服务端错误分类为C8"
 unset INNER_MODE EC_MODE
 
 echo "── 场景8: DNS 失败 → C7"
-export DNS_MODE=fail
+export DNS_MODE=fail; export INNER_MODE=conn
 r=$(run_full); check_eq "C7" "${r%%|*}" "DNS失败分类为C7"
-unset DNS_MODE
+unset DNS_MODE INNER_MODE
 
 echo "── 场景9: 路由走其他接口但内网实测通 → C0（内网通则不折腾）"
 export ROUTE_MODE=wrong

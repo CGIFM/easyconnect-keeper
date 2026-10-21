@@ -47,6 +47,7 @@ func fileExists(_ path: URL) -> Bool {
 struct KeeperStatus {
     var code = "UNKNOWN"
     var desc = "无状态"
+    var action = ""
     var time = "-"
     var heartbeatOK = false
     var paused = false
@@ -60,6 +61,7 @@ func readKeeperStatus() -> KeeperStatus {
        let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
         s.code = (obj["status"] as? String) ?? "UNKNOWN"
         s.desc = (obj["desc"] as? String) ?? ""
+        s.action = (obj["action"] as? String) ?? ""
         s.time = (obj["time"] as? String) ?? "-"
     }
     if let raw = try? String(contentsOf: heartbeatFile, encoding: .utf8),
@@ -105,6 +107,7 @@ func ecRunning() -> Bool {
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var window: NSWindow!
     var keeperValue: NSTextField!
+    var recoveryValue: NSTextField!
     var ecValue: NSTextField!
     var apiValue: NSTextField!
     var pauseButton: NSButton!
@@ -175,7 +178,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func buildWindow() {
         window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 520, height: 380),
+            contentRect: NSRect(x: 0, y: 0, width: 760, height: 410),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered, defer: false)
         window.title = "EasyConnect 控制台"
@@ -183,6 +186,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.center()
 
         keeperValue = label("读取中…", size: 14, weight: .medium)
+        recoveryValue = label("读取中…", size: 14, weight: .medium)
         ecValue = label("读取中…", size: 14, weight: .medium)
         apiValue = label("读取中…", size: 14, weight: .medium)
 
@@ -207,6 +211,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         let stack = NSStackView(views: [
             statusRow("守护", value: keeperValue),
+            statusRow("自动恢复", value: recoveryValue),
             statusRow("EasyConnect", value: ecValue),
             statusRow("内网 API", value: apiValue),
             row1, row2, hint,
@@ -269,12 +274,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             keeperValue.textColor = .labelColor
         }
 
+        recoveryValue.stringValue = k.paused ? "已暂停，等待恢复守护" : k.desc
+        recoveryValue.textColor = (k.action == "cooldown") ? .systemOrange : .secondaryLabelColor
+
         if !running {
             ecValue.stringValue = "⚫ 未运行"
             ecValue.textColor = .secondaryLabelColor
         } else if tunnel == 18 {
-            ecValue.stringValue = "🟢 已连接"
-            ecValue.textColor = .systemGreen
+            ecValue.stringValue = api.hasPrefix("通") ? "🟢 已连接" : "🟡 隧道已连接，内网尚未通过验证"
+            ecValue.textColor = api.hasPrefix("通") ? .systemGreen : .systemOrange
         } else if let t = tunnel {
             ecValue.stringValue = "🟠 运行中但未连接（result=\(t)）"
             ecValue.textColor = .systemOrange
