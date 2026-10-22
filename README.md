@@ -7,6 +7,7 @@
 ```
 主守护 keeper.sh（LaunchAgent KeepAlive，/bin/bash 3.2 兼容）
 ├── lib/health.sh      8 层健康检查 → 故障分类 C0~C8（纯函数，可单测）
+├── lib/ui_cleanup.applescript  界面清理：关闭注销页 + 点掉“最近登录信息”
 ├── 恢复状态机          分类→动作，mkdir 原子锁互斥，冷却/退避/低频观察
 ├── 心跳               heartbeat 文件每轮更新（区分「进程在」与「循环推进」）
 └── 事件记录            events.log（证据/分类/动作/耗时/验证结果，500条有界）
@@ -18,7 +19,7 @@ KeeperBar.app（菜单栏）
 └── 状态图标（心跳过期→☠️）· 暂停/维护/UA开关 · 诊断/日志/事件 · 卸载
 
 keeperctl（CLI，供人工与其他 AI 任务）
-└── status/diag/pause[限时]/resume/maint/ua/events/export
+└── status/diag/pause[限时]/resume/maint/ua/events/export/cleanup
 ```
 
 ## 8 层健康检查
@@ -79,6 +80,18 @@ keeperctl（CLI，供人工与其他 AI 任务）
 keeperctl diag                  # 8 层诊断
 keeperctl export                # 脱敏诊断包到桌面
 ```
+
+## 界面清理（注销页 / 最近登录信息）
+
+EasyConnect 每次重启或重新登录后，浏览器里旧的资源页会跳转成「用户注销成功」并留在标签页，同时 EC 右上角会弹出「最近登录信息」窗口。守护在以下时机异步运行 `lib/ui_cleanup.applescript`：
+
+- 守护启动时（清掉上次遗留）；
+- C5 拉起 EC、GUI 重启、深度重启之后；
+- 多轮执行（每轮间隔 8 秒，最多 8 轮），覆盖登录完成后的页面跳转。
+
+安全边界：只关闭标题明确匹配「注销成功 / por/logout / logout.csp」的标签；选中标签后必须确认窗口标题已切换，否则不按 Cmd+W，避免误关其他网页；清理结束把焦点还给原来的前台应用。「最近登录信息」优先点「确定/OK」按钮，找不到时点窗口内最下方的按钮兜底。
+
+手动清理：`keeperctl cleanup [轮数]`。
 
 ## 已知环境事实（诊断依据）
 

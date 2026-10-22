@@ -184,6 +184,36 @@ ec_gui_alive() { pgrep -x "EasyConnect" >/dev/null 2>&1; }
 
 ec_launch() { open "/Applications/EasyConnect.app"; }
 
+# ── UI 清理：关闭浏览器里累积的注销页 + 右上角“最近登录信息” ──
+# EC 每次重启/重新登录后，旧资源页会跳成“用户注销成功”标签并留在
+# 浏览器里；同时 EC 会弹出“最近登录信息”窗口。这里在后台异步清理，
+# 不阻塞守护主循环；多轮运行以覆盖登录完成后的页面跳转。
+UI_CLEANUP_SCRIPT="$SCRIPT_DIR/lib/ui_cleanup.applescript"
+UI_CLEANUP_LOCK="$RUN_DIR/ui_cleanup.lock"
+
+ui_cleanup_async() {
+    [ -f "$UI_CLEANUP_SCRIPT" ] || return 0
+    # 同时只允许一个清理进程；超过 5 分钟的锁视为残留
+    if [ -d "$UI_CLEANUP_LOCK" ]; then
+        if [ -n "$(find "$UI_CLEANUP_LOCK" -maxdepth 0 -mmin +5 2>/dev/null)" ]; then
+            rmdir "$UI_CLEANUP_LOCK" 2>/dev/null || true
+        else
+            return 0
+        fi
+    fi
+    mkdir "$UI_CLEANUP_LOCK" 2>/dev/null || return 0
+    (
+        out=$(/usr/bin/osascript "$UI_CLEANUP_SCRIPT" 8 2>&1)
+        rc=$?
+        rmdir "$UI_CLEANUP_LOCK" 2>/dev/null || true
+        case "$out" in
+            "closed=0 dismissed=0") [ "$rc" -eq 0 ] || log "⚠️ UI 清理失败(rc=$rc): $out" ;;
+            *) log "🧹 UI 清理完成: $out" ;;
+        esac
+    ) &
+}
+
+
 # macOS 自动化/辅助功能权限请求可能让 osascript 无限等待。任何 UI 操作
 # 最多允许 2 秒，超时只终止本次脚本，不影响 System Events 或网络应用。
 wait_ui_script() {
@@ -236,6 +266,7 @@ ec_gui_restart() {
     pkill -x "EasyConnect" 2>/dev/null || true
     sleep 1
     ec_launch
+    ui_cleanup_async
 }
 
 ec_deep_restart() {
@@ -247,6 +278,7 @@ ec_deep_restart() {
     pkill -f "CSClient" 2>/dev/null
     sleep 2
     ec_launch
+    ui_cleanup_async
 }
 
 # 代理客户端由用户管理；守护绝不拉起/结束/重启任何代理程序。
@@ -288,6 +320,7 @@ do_recover() {
         C5)
             if ! ec_gui_alive; then
                 ec_launch; action="launch-ec"; rc=0
+                ui_cleanup_async
             else
                 # GUI 仍在但隧道未连接，常见于“会话已过期”模态弹窗。
                 # 先点“好”再强制重启；点击受权限限制时，强制重启仍可兜底。
@@ -411,6 +444,9 @@ if [ -d "$FLOCK_FILE" ]; then
 fi
 trap 'release_recover_lock' EXIT INT TERM
 
+# 启动时顺手清理上次运行遗留的注销页/登录信息窗口（异步，不阻塞主循环）
+ui_cleanup_async
+
 while true; do
     rotate_log
     heartbeat "check"
@@ -457,6 +493,7 @@ while true; do
         if acquire_recover_lock; then
             log "🚨 EasyConnect 进程消失，立即拉起"
             ec_launch
+            ui_cleanup_async
             release_recover_lock
             PENDING_COUNT=0; PENDING_CLASS=""
             sleep 5

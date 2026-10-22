@@ -98,3 +98,9 @@ PROJECT_UPDATES
 - 经macOS原生管理员授权，按PID并核对完整可执行路径，仅TERM EasyConnect的ECAgent与两条svpnservice；未操作Clash、系统路由、DNS或凭据。EasyMonitor自行拉起新ECAgent，随后正常启动客户端自动登录。
 - 重建后仍使用10.10.200.38，同一网络普通内网HTTP302。该对照支持EasyConnect后台会话/数据通道状态异常，而非本次直连规则丢失或IP源地址错误；具体内部原因未进一步确定。
 - 此动作是一次性管理员授权，未赋予守护宽泛免密权限，不把这次恢复等同于已完成无人值守后台重建能力。
+
+## 2026-10-22 · 界面清理：注销页与「最近登录信息」
+- 新增 `lib/ui_cleanup.applescript`：通过 System Events 关闭 Chrome 中标题匹配「注销成功 / por/logout / logout.csp」的标签页，并点掉 EasyConnect「最近登录信息 / Login History」窗口的「确定」按钮。
+- 安全边界：只匹配明确标题；选中标签后必须确认窗口标题已切换才按 Cmd+W，绝不盲关；找不到「确定」时点窗口内最下方按钮兜底；清理结束把焦点还给原前台应用。
+- `keeper.sh` 在启动、C5 拉起 EC、GUI 重启、深度重启、进程消失后拉起等时机异步调用（8 轮 × 8 秒，互斥锁防重入）；`keeperctl cleanup [轮数]` 可手动触发。
+- 实机清空积压的 33+ 个「用户注销成功」标签，复测 `keeperctl cleanup 1` 返回 `closed=0 dismissed=0`。
