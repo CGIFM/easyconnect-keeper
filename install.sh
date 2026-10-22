@@ -101,13 +101,35 @@ EOF
 </plist>
 EOF
 
+    # 3.5 浏览器标签清理器（每 60s，纯后台 AX 操作，不发键盘事件）
+    cat > "$LA/com.cgifm.chrome-tab-cleaner.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>com.cgifm.chrome-tab-cleaner</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/osascript</string>
+        <string>$APP_SUPPORT/current/lib/ui_cleanup.applescript</string>
+    </array>
+    <key>StartInterval</key><integer>60</integer>
+    <key>RunAtLoad</key><true/>
+    <key>StandardOutPath</key><string>$LOG_DIR/ui_cleanup.out.log</string>
+    <key>StandardErrorPath</key><string>$LOG_DIR/ui_cleanup.err.log</string>
+</dict>
+</plist>
+EOF
+
     launchctl unload "$LA/$PLIST_NAME" 2>/dev/null || true
     launchctl unload "$LA/com.cgifm.easyconnect-keeper-watchdog.plist" 2>/dev/null || true
+    launchctl unload "$LA/com.cgifm.chrome-tab-cleaner.plist" 2>/dev/null || true
     # 防多实例：清理可能残留的手动启动实例
     pkill -f "$APP_SUPPORT/keeper.sh" 2>/dev/null || true
     sleep 1
     launchctl load "$LA/$PLIST_NAME"
     launchctl load "$LA/com.cgifm.easyconnect-keeper-watchdog.plist"
+    launchctl load "$LA/com.cgifm.chrome-tab-cleaner.plist"
 
     # 4. keeperctl 软链到 PATH 可及位置
     ln -sf "$APP_SUPPORT/current/keeperctl" /usr/local/bin/keeperctl 2>/dev/null \
@@ -185,8 +207,9 @@ uninstall() {
     echo "🛑 卸载 EasyConnect Keeper ..."
     launchctl unload "$LA/$PLIST_NAME" 2>/dev/null || true
     launchctl unload "$LA/com.cgifm.easyconnect-keeper-watchdog.plist" 2>/dev/null || true
+    launchctl unload "$LA/com.cgifm.chrome-tab-cleaner.plist" 2>/dev/null || true
     launchctl unload "$LA/com.cgifm.keeperbar.plist" 2>/dev/null || true
-    rm -f "$LA/$PLIST_NAME" "$LA/com.cgifm.easyconnect-keeper-watchdog.plist" "$LA/com.cgifm.keeperbar.plist"
+    rm -f "$LA/$PLIST_NAME" "$LA/com.cgifm.easyconnect-keeper-watchdog.plist" "$LA/com.cgifm.chrome-tab-cleaner.plist" "$LA/com.cgifm.keeperbar.plist"
     pkill -f "KeeperBar" 2>/dev/null || true
     pkill -f "$APP_SUPPORT" 2>/dev/null || true
     rm -rf "$APP_SUPPORT"

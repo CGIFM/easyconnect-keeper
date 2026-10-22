@@ -80,6 +80,21 @@ keeperctl diag                  # 8 层诊断
 keeperctl export                # 脱敏诊断包到桌面
 ```
 
+## 浏览器标签后台清理
+
+`lib/ui_cleanup.applescript` 由独立 LaunchAgent `com.cgifm.chrome-tab-cleaner`
+每 60 秒在后台执行（也由安装/升级自动加载）：
+
+- 关闭 Chrome 里所有「用户注销成功」标签（标题含 `注销成功 / por/logout / logout.csp`），一个不留；
+- 「JLC内网VPN远程系统」标签重复时只保留第一个，其余关掉；
+- 顺手点掉 EasyConnect「最近登录信息 / Login History」窗口的「确定」。
+
+安全边界（2026-10-22 重写）：**绝不发送键盘事件**；只处理有可见窗口的 Chrome
+（Playwright 等无窗口实例跳过）；选中标签后必须确认窗口标题已切换，才按该标签
+自身的 Close 按钮；只匹配明确标题，不按索引盲关。
+
+手动触发：`keeperctl cleanup`；日志：`~/Library/Logs/easyconnect-keeper/ui_cleanup.out.log`。
+
 ## 已知环境事实（诊断依据）
 
 - hosts 已有 `10.196.3.243 claude.jlcops.com`（两行重复，遗留），**系统 AAAA 查询路径 5s 超时**：所有走系统 DNS 的连接首建慢 5s；`curl -4` / hosts 命中后 0.4s。修复需改系统 DNS 配置，属人工范围

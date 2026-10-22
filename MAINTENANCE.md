@@ -17,6 +17,8 @@
    - C1 → 等网络，别动配置
    - C6 → 守护会自动恢复（GUI 重启+auto_login），最多等 2 分钟
    - C7/C8 → 看证据里的具体信息，通常不是本机问题
+4. **浏览器注销页 / 重复 VPN 标签**：`com.cgifm.chrome-tab-cleaner` 每 60s 后台清理
+   （纯 AX，不发键盘事件）；也可手动 `keeperctl cleanup`。它只关标题匹配的标签。
 
 ## 严格禁止
 

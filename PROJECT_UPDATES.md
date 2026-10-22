@@ -98,3 +98,11 @@ PROJECT_UPDATES
 - 经macOS原生管理员授权，按PID并核对完整可执行路径，仅TERM EasyConnect的ECAgent与两条svpnservice；未操作Clash、系统路由、DNS或凭据。EasyMonitor自行拉起新ECAgent，随后正常启动客户端自动登录。
 - 重建后仍使用10.10.200.38，同一网络普通内网HTTP302。该对照支持EasyConnect后台会话/数据通道状态异常，而非本次直连规则丢失或IP源地址错误；具体内部原因未进一步确定。
 - 此动作是一次性管理员授权，未赋予守护宽泛免密权限，不把这次恢复等同于已完成无人值守后台重建能力。
+
+## 2026-10-22 · 重做标签清理：纯后台 AX，修复误关终端
+- 事故：上一版用全局 `keystroke "w" using command down` 关标签，焦点漂移时把终端/Claude Code 窗口一起关掉，已整版回退（revert）。
+- 根因之二：机器上同时有 3 个「Google Chrome」实例，其中两个是 Playwright MCP 的无窗口实例；按应用名取窗口会拿到空实例，脚本“看不见标签却仍在按快捷键”。
+- 新版 `lib/ui_cleanup.applescript`：按 PID/进程逐个枚举**有窗口**的 Chrome，选中目标标签→校验窗口标题已切换→按该标签自身的 Close 按钮；全程不发任何键盘事件。
+- 功能：注销页（注销成功 / por/logout / logout.csp）见一个关一个；「JLC内网VPN远程系统」重复时保留第一个；顺带点掉 EasyConnect「最近登录信息」。
+- 独立 LaunchAgent `com.cgifm.chrome-tab-cleaner` 每 60s 后台执行；`keeperctl cleanup` 可手动触发；安装/卸载同步管理。
+- 实机验证：关闭 1 个注销页、合并 2 个重复 VPN 标签为 1 个；空跑返回 `closed_logout=0 closed_dup=0 dismissed=0`。
