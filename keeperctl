@@ -11,7 +11,6 @@
 #   keeperctl maint on|off      维护模式（安装/升级/网络维护前先 on）
 #   keeperctl ua on|off         无人值守模式开关
 #   keeperctl events            最近事件记录
-#   keeperctl cleanup [轮数]     关闭浏览器累积的注销页 + EC 最近登录信息窗口
 # -------------------------------------------------------------
 # ⚠️ 其他 AI 任务操作说明（网络排障必读）：
 #   1. 联网失败先跑 `keeperctl diag` 看分类与证据，不要盲目改配置
@@ -143,16 +142,6 @@ cmd_events() {
     tail -20 "$EVENTS_FILE" 2>/dev/null || echo "暂无事件"
 }
 
-cmd_cleanup() {
-    local script="$SCRIPT_DIR/lib/ui_cleanup.applescript"
-    if [ ! -f "$script" ]; then
-        echo "❌ 找不到 $script"
-        return 1
-    fi
-    echo "🧹 清理浏览器注销页与 EasyConnect‘最近登录信息’窗口 ..."
-    /usr/bin/osascript "$script" "${1:-2}"
-}
-
 case "${1:-}" in
     status)  cmd_status ;;
     diag)    cmd_diag ;;
@@ -162,6 +151,5 @@ case "${1:-}" in
     maint)   cmd_maint "${2:-}" ;;
     ua)      cmd_ua "${2:-}" ;;
     events)  cmd_events ;;
-    cleanup) cmd_cleanup "${2:-}" ;;
     *)       awk 'NR>=4 && NR<=34 {sub(/^# ?/,""); print}' "$0" | head -31 ;;
 esac
